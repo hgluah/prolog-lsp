@@ -13,7 +13,7 @@ use texter::{change::GridIndex, core::text::Text};
 
 use super::{
     docs::{self, Script, ValueRequirment},
-    queries::attributes::TRUNK_ATTRS,
+    queries::COMPLETE_ON,
 };
 
 impl TrunkAttrState {
@@ -259,13 +259,13 @@ impl TrunkAttrState {
 pub fn completions(pos: GridIndex, n: Node, text: &Text) -> Option<CompletionResponse> {
     let s = text.text.as_str();
     let mut cursor = QueryCursor::new();
-    let element_id = TRUNK_ATTRS
+    let element_id = COMPLETE_ON
         .capture_names()
         .iter()
         .position(|e| *e == "element")
         .unwrap() as u32;
     let mut matches = cursor
-        .matches(&TRUNK_ATTRS, n, s.as_bytes())
+        .matches(&COMPLETE_ON, n, s.as_bytes())
         .flat_map(|qm| {
             qm.captures
                 .iter()

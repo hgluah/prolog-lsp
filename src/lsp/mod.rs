@@ -70,7 +70,7 @@ fn handle_notification(
         }
         method => warn!(
             "Unsupported notification recieved -> {method} {}",
-            noti.params
+            noti.params,
         ),
     };
 
@@ -115,7 +115,7 @@ fn handle_request(parser: &mut Parser, req: lsp_server::Request) -> anyhow::Resu
             pos.normalize(text)?;
             return Ok(Response::new_ok(req.id, hover(pos, tree.root_node(), text)));
         }
-        _ => {}
+        method => warn!("Unsupported request recieved -> {method} {}", req.params),
     }
 
     Ok(Response::new_ok(req.id, None::<String>))
