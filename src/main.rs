@@ -5,6 +5,7 @@ mod utils;
 
 use init::initialize_result;
 use lsp::main_loop;
+use tracing::info;
 
 use std::{fs::File, io::stderr};
 
@@ -39,6 +40,7 @@ fn main() -> anyhow::Result<()> {
         log_to_stdout();
     }
 
+    info!("Prolog LSP started. Entering main loop...");
     main_loop(text_fn, con)?;
 
     Ok(())

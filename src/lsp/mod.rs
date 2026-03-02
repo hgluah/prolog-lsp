@@ -10,8 +10,7 @@ use document::DOCUMENTS;
 use hover::hover;
 use lsp_server::{Connection, Message, Response};
 use lsp_types::{
-    CompletionParams, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, HoverParams, TextDocumentPositionParams, Uri,
+    TextDocumentPositionParams, Uri,
     notification::{
         DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification,
     },
@@ -45,28 +44,34 @@ fn handle_notification(
     noti: lsp_server::Notification,
 ) -> anyhow::Result<()> {
     let mut docs = DOCUMENTS.lock().unwrap();
-    match noti.method.as_str() {
+    match &*noti.method {
         DidChangeTextDocument::METHOD => {
-            let p: DidChangeTextDocumentParams = serde_json::from_value(noti.params)?;
+            let p: <DidChangeTextDocument as Notification>::Params =
+                serde_json::from_value(noti.params)?;
             let (tree, text) = docs.get_mut(&p.text_document.uri).unwrap();
             for ch in p.content_changes.into_iter() {
                 text.update(Change::from(ch), tree)?;
             }
         }
         DidOpenTextDocument::METHOD => {
-            let p: DidOpenTextDocumentParams = serde_json::from_value(noti.params)?;
+            let p: <DidOpenTextDocument as Notification>::Params =
+                serde_json::from_value(noti.params)?;
             let tree = parser
                 .parse(p.text_document.text.as_bytes(), None)
                 .context("Tree not returned during parsing")?;
             docs.insert(p.text_document.uri, (tree, text_fn(p.text_document.text)));
         }
         DidCloseTextDocument::METHOD => {
-            let p: DidCloseTextDocumentParams = serde_json::from_value(noti.params)?;
+            let p: <DidCloseTextDocument as Notification>::Params =
+                serde_json::from_value(noti.params)?;
             if docs.remove(&p.text_document.uri).is_none() {
                 warn!("Closed non registered document.")
             }
         }
-        method => warn!("Unsupported notification recieved -> {}", method),
+        method => warn!(
+            "Unsupported notification recieved -> {method} {}",
+            noti.params
+        ),
     };
 
     Ok(())
@@ -74,14 +79,11 @@ fn handle_notification(
 
 fn handle_request(parser: &mut Parser, req: lsp_server::Request) -> anyhow::Result<Response> {
     let mut docs = DOCUMENTS.lock().unwrap();
-    match req.method.as_str() {
+    match &*req.method {
         Completion::METHOD => {
-            let p: CompletionParams = serde_json::from_value(req.params)?;
+            let p: <Completion as Request>::Params = serde_json::from_value(req.params)?;
             let (mut pos, uri): (GridIndex, Uri) = {
-                let CompletionParams {
-                    text_document_position,
-                    ..
-                } = p;
+                let text_document_position = p.text_document_position;
 
                 (
                     text_document_position.position.into(),
@@ -100,7 +102,7 @@ fn handle_request(parser: &mut Parser, req: lsp_server::Request) -> anyhow::Resu
             ));
         }
         HoverRequest::METHOD => {
-            let p: HoverParams = serde_json::from_value(req.params)?;
+            let p: <HoverRequest as Request>::Params = serde_json::from_value(req.params)?;
             let TextDocumentPositionParams {
                 text_document: id,
                 position: pos,

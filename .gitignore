@@ -1,4 +1,5 @@
 target/
 
-node_modules/
-*.vsix
+vscode/lsp_bin/
+vscode/node_modules/
+vscode/*.vsix
