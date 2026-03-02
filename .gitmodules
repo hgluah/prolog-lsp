@@ -1,0 +1,3 @@
+[submodule "prolog-grammar/tree-sitter-prolog"]
+	path = prolog-grammar/tree-sitter-prolog
+	url = https://github.com/foxyseta/tree-sitter-prolog.git

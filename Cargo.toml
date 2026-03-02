@@ -1,0 +1,11 @@
+[package]
+name = "prolog-lsp"
+version = "0.1.0"
+edition = "2024"
+
+[build-dependencies]
+prolog-grammar = { path = "prolog-grammar" }
+auto-lsp-codegen = "0.2.1"
+
+[dependencies]
+auto-lsp = { version = "0.6.2", features = ["lsp_server"] }
