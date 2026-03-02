@@ -2,7 +2,7 @@
 cd "$(dirname "$0")"
 set -euxo pipefail
 
-cargo build
+CARGO_TARGET_DIR=target/ cargo install --path .
 (
     cd vscode/
     npm i

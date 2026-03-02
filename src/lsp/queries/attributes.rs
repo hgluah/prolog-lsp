@@ -12,5 +12,5 @@ pub static TRUNK_ATTRS: LazyLock<Query> = LazyLock::new(|| {
             (#any-eq? @attr.name "data-trunk")
     ) @element
 "#;
-    Query::new(&tree_sitter_html::LANGUAGE.into(), QS).unwrap()
+    Query::new(&prolog_grammar::LANGUAGE.into(), QS).unwrap()
 });

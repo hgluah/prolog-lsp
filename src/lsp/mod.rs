@@ -10,12 +10,12 @@ use document::DOCUMENTS;
 use hover::hover;
 use lsp_server::{Connection, Message, Response};
 use lsp_types::{
+    CompletionParams, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
+    DidOpenTextDocumentParams, HoverParams, TextDocumentPositionParams, Uri,
     notification::{
         DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification,
     },
     request::{Completion, HoverRequest, Request},
-    CompletionParams, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, HoverParams, TextDocumentPositionParams, Uri,
 };
 use tracing::warn;
 use tree_sitter::Parser;
@@ -25,7 +25,7 @@ use texter::change::{Change, GridIndex};
 
 pub fn main_loop(text_fn: TextFn, con: Connection) -> anyhow::Result<()> {
     let mut parser = Parser::new();
-    parser.set_language(&tree_sitter_html::LANGUAGE.into())?;
+    parser.set_language(&prolog_grammar::LANGUAGE.into())?;
     for msg in con.receiver {
         match msg {
             Message::Notification(noti) => handle_notification(&mut parser, text_fn, noti)?,

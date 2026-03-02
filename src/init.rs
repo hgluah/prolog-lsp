@@ -15,7 +15,14 @@ pub fn initialize_result(p: &InitializeParams) -> (TextFn, InitializeResult) {
         .as_ref()
         .and_then(|g| g.position_encodings.as_deref());
 
-    let (t_fn, enc) = decide_encoding(pos_encoding);
+    let (t_fn, enc): (TextFn, _) = if pos_encoding
+        .unwrap_or(&[])
+        .contains(&PositionEncodingKind::UTF8)
+    {
+        (Text::new, PositionEncodingKind::UTF8)
+    } else {
+        (Text::new_utf16, PositionEncodingKind::UTF16)
+    };
 
     let res = InitializeResult {
         capabilities: ServerCapabilities {
@@ -25,32 +32,15 @@ pub fn initialize_result(p: &InitializeParams) -> (TextFn, InitializeResult) {
             )),
             hover_provider: Some(HoverProviderCapability::Simple(true)),
             completion_provider: Some(CompletionOptions {
-                trigger_characters: Some(vec!["-".to_string(), "\"".to_string(), " ".to_string()]),
+                trigger_characters: Some(["."].map(str::to_owned).into()),
                 ..Default::default()
             }),
             ..Default::default()
         },
         server_info: Some(ServerInfo {
-            name: String::from("trunkls"),
+            name: String::from("prolog-lsp"),
             version: env!("CARGO_PKG_VERSION").to_string().into(),
         }),
     };
     (t_fn, res)
-}
-
-fn decide_encoding(encs: Option<&[PositionEncodingKind]>) -> (TextFn, PositionEncodingKind) {
-    const DEFAULT: (TextFn, PositionEncodingKind) = (Text::new_utf16, PositionEncodingKind::UTF16);
-    let Some(encs) = encs else {
-        return DEFAULT;
-    };
-
-    for enc in encs {
-        if *enc == PositionEncodingKind::UTF16 {
-            return (Text::new_utf16, enc.clone());
-        } else if *enc == PositionEncodingKind::UTF8 {
-            return (Text::new, enc.clone());
-        }
-    }
-
-    DEFAULT
 }
