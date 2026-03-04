@@ -1,5 +1,5 @@
 use lsp_types::{
-    CompletionOptions, HoverProviderCapability, InitializeParams, InitializeResult,
+    CompletionOptions, InitializeParams, InitializeResult,
     PositionEncodingKind, ServerCapabilities, ServerInfo, TextDocumentSyncCapability,
     TextDocumentSyncKind,
 };
@@ -30,7 +30,6 @@ pub fn initialize_result(p: &InitializeParams) -> (TextFn, InitializeResult) {
             text_document_sync: Some(TextDocumentSyncCapability::Kind(
                 TextDocumentSyncKind::INCREMENTAL,
             )),
-            hover_provider: Some(HoverProviderCapability::Simple(true)),
             completion_provider: Some(CompletionOptions {
                 trigger_characters: Some(["."].map(str::to_owned).into()),
                 ..Default::default()

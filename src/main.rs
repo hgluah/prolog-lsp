@@ -1,7 +1,5 @@
-mod attr_state;
 mod init;
 mod lsp;
-mod utils;
 
 use init::initialize_result;
 use lsp::main_loop;

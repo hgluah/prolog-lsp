@@ -96,7 +96,7 @@ impl<'tree> Iterator for Ascendants<'tree> {
         if let Some(res) = res {
             self.0 = res;
         }
-        return res;
+        res
     }
 }
 
@@ -116,9 +116,7 @@ pub fn search_functions<'tree>(
         })
         .filter(|(kind, node)| {
             let function = match kind {
-                SEARCH_FUNCTIONS::Atom | SEARCH_FUNCTIONS::Variable => Ascendants(*node)
-                    .filter(|p| p.kind() == "functional_notation")
-                    .next(),
+                SEARCH_FUNCTIONS::Atom | SEARCH_FUNCTIONS::Variable => Ascendants(*node).find(|p| p.kind() == "functional_notation"),
                 SEARCH_FUNCTIONS::Function => Some(node.parent().unwrap()),
             };
             match function.and_then(|function| function.parent()) {

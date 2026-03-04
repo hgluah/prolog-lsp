@@ -1,19 +1,16 @@
 mod completions;
-pub mod docs;
 mod document;
-mod hover;
 pub mod queries;
 
 use anyhow::Context;
 use document::DOCUMENTS;
-use hover::hover;
 use lsp_server::{Connection, Message, Response};
 use lsp_types::{
-    TextDocumentPositionParams, Uri,
+    Uri,
     notification::{
         DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification,
     },
-    request::{Completion, HoverRequest, Request},
+    request::{Completion, Request},
 };
 use tracing::warn;
 use tree_sitter::Parser;
@@ -101,22 +98,6 @@ fn handle_request(parser: &mut Parser, req: lsp_server::Request) -> anyhow::Resu
                 .context("Requested completion for unknown document.")?;
             document.recompute(parser, Some(&mut pos))?;
             return Ok(Response::new_ok(req.id, completions(pos, document)?));
-        }
-        HoverRequest::METHOD => {
-            let p: <HoverRequest as Request>::Params = serde_json::from_value(req.params)?;
-            let TextDocumentPositionParams {
-                text_document: id,
-                position: pos,
-            } = p.text_document_position_params;
-            let document = docs
-                .get_mut(&id.uri)
-                .context("Requested hover for unknown document.")?;
-            let mut pos = GridIndex::from(pos);
-            document.recompute(parser, Some(&mut pos))?;
-            return Ok(Response::new_ok(
-                req.id,
-                hover(pos, document.tree.root_node(), &document.text),
-            ));
         }
         method => warn!("Unsupported request recieved -> {method} {}", req.params),
     }

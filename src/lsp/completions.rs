@@ -4,7 +4,7 @@ use indexmap::IndexSet;
 use lsp_types::{CompletionItem, CompletionItemKind, CompletionResponse};
 use rustc_hash::FxBuildHasher;
 use streaming_iterator::StreamingIterator;
-use tree_sitter::{Point, QueryCursor};
+use tree_sitter::QueryCursor;
 
 use crate::lsp::{
     document::Document,
@@ -64,7 +64,7 @@ pub fn completions(pos: GridIndex, document: &Document) -> anyhow::Result<Comple
             .filter(|completion| name != completion.label && completion.label.starts_with(name))
             .map(Wrapper)
             .fold(
-                IndexSet::<_, FxBuildHasher>::with_hasher(FxBuildHasher::default()),
+                IndexSet::<_, FxBuildHasher>::with_hasher(FxBuildHasher),
                 |mut acc, x| {
                     acc.insert(x);
                     acc
