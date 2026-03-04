@@ -30,10 +30,10 @@ pub fn completions(pos: GridIndex, document: &Document) -> anyhow::Result<Comple
         Some(&(kind, node)) => (kind, {
             let mut range = node.start_byte()..node.end_byte();
             if let Some(row_start) = document.text.br_indexes.row_start(pos.row) {
-                range.end = range.end.min(row_start + pos.column)
+                range.end = (row_start + pos.column).clamp(range.start, range.end);
             };
-            str::from_utf8(&document.text.text.as_bytes()[range])
-        }?),
+            str::from_utf8(&document.text.text.as_bytes()[range])?
+        }),
         None => (COMPLETE::Atom, ""),
     };
 

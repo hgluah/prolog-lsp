@@ -14,7 +14,7 @@ use crate::lsp::queries::search_functions;
 use super::queries::SEARCH_FUNCTIONS;
 
 pub static DOCUMENTS: LazyLock<Mutex<Documents>> = LazyLock::new(Mutex::default);
-type Documents = FxHashMap<Uri, Document>;
+pub type Documents = FxHashMap<Uri, Document>;
 impl Document {
     pub fn new(tree: Tree, text: Text, parser: &mut Parser) -> anyhow::Result<Self> {
         let mut res = Self {

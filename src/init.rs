@@ -1,7 +1,6 @@
 use lsp_types::{
-    CompletionOptions, InitializeParams, InitializeResult,
-    PositionEncodingKind, ServerCapabilities, ServerInfo, TextDocumentSyncCapability,
-    TextDocumentSyncKind,
+    CompletionOptions, InitializeParams, InitializeResult, OneOf, PositionEncodingKind,
+    ServerCapabilities, ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind,
 };
 
 use texter::core::text::Text;
@@ -31,9 +30,10 @@ pub fn initialize_result(p: &InitializeParams) -> (TextFn, InitializeResult) {
                 TextDocumentSyncKind::INCREMENTAL,
             )),
             completion_provider: Some(CompletionOptions {
-                trigger_characters: Some(["."].map(str::to_owned).into()),
+                trigger_characters: Some(["(", "["].map(str::to_owned).into()),
                 ..Default::default()
             }),
+            references_provider: Some(OneOf::Left(true)),
             ..Default::default()
         },
         server_info: Some(ServerInfo {

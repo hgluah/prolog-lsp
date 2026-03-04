@@ -14,7 +14,8 @@
         ],
         "aliases": [
           "Prolog"
-        ]
+        ],
+        "configuration": "./language-configuration.json"
       }
     ]
   },

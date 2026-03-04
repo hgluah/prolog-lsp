@@ -1,6 +1,8 @@
 mod completions;
+mod diagnostics;
 mod document;
 pub mod queries;
+mod references;
 
 use anyhow::Context;
 use document::DOCUMENTS;
@@ -8,16 +10,20 @@ use lsp_server::{Connection, Message, Response};
 use lsp_types::{
     Uri,
     notification::{
-        DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification,
+        DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument,
+        Notification, PublishDiagnostics,
     },
-    request::{Completion, Request},
+    request::{Completion, References, Request},
 };
 use tracing::warn;
 use tree_sitter::Parser;
 
 use crate::{
     init::TextFn,
-    lsp::{completions::completions, document::Document},
+    lsp::{
+        completions::completions, diagnostics::diagnostics, document::Document,
+        references::references,
+    },
 };
 use texter::change::{Change, GridIndex};
 
@@ -26,11 +32,17 @@ pub fn main_loop(text_fn: TextFn, con: Connection) -> anyhow::Result<()> {
     parser.set_language(&prolog_grammar::LANGUAGE.into())?;
     for msg in con.receiver {
         match msg {
-            Message::Notification(noti) => handle_notification(&mut parser, text_fn, noti)?,
-            Message::Request(req) => con
-                .sender
-                .send(Message::Response(handle_request(&mut parser, req)?))?,
-            _ => continue,
+            Message::Notification(noti) => {
+                if let Some(iter) = handle_notification(&mut parser, text_fn, noti)? {
+                    iter.map(Message::Notification)
+                        .try_for_each(|response| con.sender.send(response))?;
+                }
+            }
+            Message::Request(req) => {
+                let response = Message::Response(handle_request(&mut parser, req)?);
+                con.sender.send(response)?;
+            }
+            Message::Response(_) => unreachable!(),
         };
     }
 
@@ -41,16 +53,32 @@ fn handle_notification(
     parser: &mut Parser,
     text_fn: TextFn,
     noti: lsp_server::Notification,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<impl Iterator<Item = lsp_server::Notification>>> {
     let mut docs = DOCUMENTS.lock().unwrap();
-    match &*noti.method {
+    Ok(match &*noti.method {
         DidChangeTextDocument::METHOD => {
             let p: <DidChangeTextDocument as Notification>::Params =
                 serde_json::from_value(noti.params)?;
-            let document = docs.get_mut(&p.text_document.uri).unwrap();
+            let document = docs
+                .get_mut(&p.text_document.uri)
+                .context("Changed unknown document.")?;
             for ch in p.content_changes.into_iter() {
                 document.text.update(Change::from(ch), &mut document.tree)?;
             }
+            None
+        }
+        DidSaveTextDocument::METHOD => {
+            let p: <DidSaveTextDocument as Notification>::Params =
+                serde_json::from_value(noti.params)?;
+            let document = docs
+                .get_mut(&p.text_document.uri)
+                .context("Saved unknown document.")?;
+            document.recompute(parser, None)?;
+            Some(diagnostics(&docs, p.text_document.uri).into_iter().map(
+                |res: <PublishDiagnostics as Notification>::Params| {
+                    lsp_server::Notification::new(PublishDiagnostics::METHOD.to_owned(), res)
+                },
+            ))
         }
         DidOpenTextDocument::METHOD => {
             let p: <DidOpenTextDocument as Notification>::Params =
@@ -62,6 +90,7 @@ fn handle_notification(
                 p.text_document.uri,
                 Document::new(tree, text_fn(p.text_document.text), parser)?,
             );
+            None
         }
         DidCloseTextDocument::METHOD => {
             let p: <DidCloseTextDocument as Notification>::Params =
@@ -69,21 +98,24 @@ fn handle_notification(
             if docs.remove(&p.text_document.uri).is_none() {
                 warn!("Closed non registered document.")
             }
+            None
         }
-        method => warn!(
-            "Unsupported notification recieved -> {method} {}",
-            noti.params,
-        ),
-    };
-
-    Ok(())
+        method => {
+            warn!(
+                "Unsupported notification recieved -> {method} {}",
+                noti.params
+            );
+            None
+        }
+    })
 }
 
 fn handle_request(parser: &mut Parser, req: lsp_server::Request) -> anyhow::Result<Response> {
     let mut docs = DOCUMENTS.lock().unwrap();
-    match &*req.method {
+    Ok(match &*req.method {
         Completion::METHOD => {
             let p: <Completion as Request>::Params = serde_json::from_value(req.params)?;
+            let res: <Completion as Request>::Result;
             let (mut pos, uri): (GridIndex, Uri) = {
                 let text_document_position = p.text_document_position;
 
@@ -97,10 +129,32 @@ fn handle_request(parser: &mut Parser, req: lsp_server::Request) -> anyhow::Resu
                 .get_mut(&uri)
                 .context("Requested completion for unknown document.")?;
             document.recompute(parser, Some(&mut pos))?;
-            return Ok(Response::new_ok(req.id, completions(pos, document)?));
+            res = Some(completions(pos, document)?);
+            Response::new_ok(req.id, res)
         }
-        method => warn!("Unsupported request recieved -> {method} {}", req.params),
-    }
+        References::METHOD => {
+            let p: <References as Request>::Params = serde_json::from_value(req.params)?;
+            let res: <References as Request>::Result;
 
-    Ok(Response::new_ok(req.id, None::<String>))
+            let (mut pos, uri): (GridIndex, Uri) = {
+                let text_document_position = p.text_document_position;
+
+                (
+                    text_document_position.position.into(),
+                    text_document_position.text_document.uri,
+                )
+            };
+
+            let document = docs
+                .get_mut(&uri)
+                .context("Requested completion for unknown document.")?;
+            document.recompute(parser, Some(&mut pos))?;
+            res = references(pos, p.context, &docs, uri)?;
+            Response::new_ok(req.id, res)
+        }
+        method => {
+            warn!("Unsupported request recieved -> {method} {}", req.params);
+            Response::new_ok(req.id, None::<String>)
+        }
+    })
 }

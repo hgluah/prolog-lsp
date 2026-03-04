@@ -62,6 +62,16 @@ macro_rules! query {
 }
 
 query!(
+    IDENT,
+    r#"
+        [
+            (atom) @name
+        ]
+    "#,
+    name: Ident,
+);
+
+query!(
     SEARCH_FUNCTIONS,
     r#"
         [
@@ -100,6 +110,14 @@ impl<'tree> Iterator for Ascendants<'tree> {
     }
 }
 
+pub fn idents<'tree, I: AsRef<[u8]>>(
+    cursor: &'tree mut QueryCursor,
+    tree: Node<'tree>,
+    text: impl TextProvider<I>,
+) -> impl StreamingIterator<Item = Node<'tree>> {
+    IDENT_RAW(cursor, tree, text).map(|&(IDENT::Ident, x)| x)
+}
+
 pub fn search_functions<'tree>(
     cursor: &'tree mut QueryCursor,
     tree: Node<'tree>,
@@ -116,7 +134,9 @@ pub fn search_functions<'tree>(
         })
         .filter(|(kind, node)| {
             let function = match kind {
-                SEARCH_FUNCTIONS::Atom | SEARCH_FUNCTIONS::Variable => Ascendants(*node).find(|p| p.kind() == "functional_notation"),
+                SEARCH_FUNCTIONS::Atom | SEARCH_FUNCTIONS::Variable => {
+                    Ascendants(*node).find(|p| p.kind() == "functional_notation")
+                }
                 SEARCH_FUNCTIONS::Function => Some(node.parent().unwrap()),
             };
             match function.and_then(|function| function.parent()) {
