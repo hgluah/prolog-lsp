@@ -4,7 +4,7 @@ use indexmap::IndexSet;
 use lsp_types::{CompletionItem, CompletionItemKind, CompletionResponse};
 use rustc_hash::FxBuildHasher;
 use streaming_iterator::StreamingIterator;
-use tree_sitter::QueryCursor;
+use tree_sitter::{Point, QueryCursor};
 
 use crate::lsp::{
     document::Document,
@@ -27,7 +27,13 @@ pub fn completions(pos: GridIndex, document: &Document) -> anyhow::Result<Comple
     let node = node.next();
 
     let (kind, name) = match node {
-        Some(&(kind, node)) => (kind, node.utf8_text(document.text.text.as_bytes())?),
+        Some(&(kind, node)) => (kind, {
+            let mut range = node.start_byte()..node.end_byte();
+            if let Some(row_start) = document.text.br_indexes.row_start(pos.row) {
+                range.end = range.end.min(row_start + pos.column)
+            };
+            str::from_utf8(&document.text.text.as_bytes()[range])
+        }?),
         None => (COMPLETE::Atom, ""),
     };
 
