@@ -1,4 +1,4 @@
-use std::{ops::Deref, sync::LazyLock};
+use std::sync::LazyLock;
 
 use tree_sitter::{Node, Query, QueryCursor, StreamingIterator, TextProvider};
 
@@ -33,24 +33,15 @@ macro_rules! query {
             });
             #[derive(Clone, Copy, Debug)]
             #[allow(non_camel_case_types)]
-            pub enum $QUERY<'tree> {
-                $($variant(Node<'tree>),)*
-            }
-            impl<'tree> Deref for $QUERY<'tree> {
-                type Target = Node<'tree>;
-
-                fn deref(&self) -> &Self::Target {
-                    match self {
-                        $(Self::$variant(node) => node,)*
-                    }
-                }
+            pub enum $QUERY {
+                $($variant,)*
             }
             #[allow(non_snake_case)]
             fn [<$QUERY _RAW>]<'tree, I: AsRef<[u8]>>(
                 cursor: &'tree mut QueryCursor,
                 tree: Node<'tree>,
                 text: impl TextProvider<I>,
-            ) -> impl streaming_iterator::StreamingIterator<Item = $QUERY<'tree>> {
+            ) -> impl streaming_iterator::StreamingIterator<Item = ($QUERY, Node<'tree>)> {
                 cursor
                     .matches(&[<$QUERY _QUERY>], tree, text)
                     .map(|qm| match qm.captures {
@@ -60,7 +51,7 @@ macro_rules! query {
                     .filter_map(|m| match m.index {
                         $(
                             id if id == [<$QUERY _VARS>].$capture => {
-                                (m.node.child_count() == 0).then_some($QUERY::$variant(m.node))
+                                (m.node.child_count() == 0).then_some(($QUERY::$variant, m.node))
                             }
                         )*
                         _ => unreachable!(),
@@ -113,24 +104,22 @@ pub fn search_functions<'tree>(
     cursor: &'tree mut QueryCursor,
     tree: Node<'tree>,
     text: &'tree [u8],
-) -> impl StreamingIterator<Item = SEARCH_FUNCTIONS<'tree>> {
+) -> impl StreamingIterator<Item = (SEARCH_FUNCTIONS, Node<'tree>)> {
     SEARCH_FUNCTIONS_RAW(cursor, tree, text)
-        .filter(|node| {
-            !matches!(node, SEARCH_FUNCTIONS::Atom(node) if
+        .filter(|(kind, node)| {
+            !matches!(kind, SEARCH_FUNCTIONS::Atom if
                 matches!(
                     node.parent(),
                     Some(p) if p.kind() == "functional_notation" && p.child(0).unwrap() == *node,
                 )
             )
         })
-        .filter(|node| {
-            let function = match node {
-                SEARCH_FUNCTIONS::Atom(node) | SEARCH_FUNCTIONS::Variable(node) => {
-                    Ascendants(*node)
-                        .filter(|p| p.kind() == "functional_notation")
-                        .next()
-                }
-                SEARCH_FUNCTIONS::Function(function) => Some(function.parent().unwrap()),
+        .filter(|(kind, node)| {
+            let function = match kind {
+                SEARCH_FUNCTIONS::Atom | SEARCH_FUNCTIONS::Variable => Ascendants(*node)
+                    .filter(|p| p.kind() == "functional_notation")
+                    .next(),
+                SEARCH_FUNCTIONS::Function => Some(node.parent().unwrap()),
             };
             match function.and_then(|function| function.parent()) {
                 Some(op) => match op.kind() {
@@ -149,7 +138,7 @@ pub fn completions<'tree, I: AsRef<[u8]>>(
     cursor: &'tree mut QueryCursor,
     tree: Node<'tree>,
     text: impl TextProvider<I>,
-) -> impl StreamingIterator<Item = COMPLETE<'tree>> {
+) -> impl StreamingIterator<Item = (COMPLETE, Node<'tree>)> {
     COMPLETE_RAW(cursor, tree, text)
 }
 
@@ -178,16 +167,8 @@ mod tests {
 
         let mut cursor = QueryCursor::new();
         let matches = search_functions(&mut cursor, tree.root_node(), text.as_bytes());
-        let res = matches.fold(String::new(), |mut acc, &x| {
-            acc += &format!(
-                "\n{}({})",
-                match x {
-                    SEARCH_FUNCTIONS::Function(_) => "Function",
-                    SEARCH_FUNCTIONS::Atom(_) => "Atom",
-                    SEARCH_FUNCTIONS::Variable(_) => "Variable",
-                },
-                x.utf8_text(text.as_bytes()).unwrap(),
-            );
+        let res = matches.fold(String::new(), |mut acc, (kind, node)| {
+            acc += &format!("\n{kind:?}({})", node.utf8_text(text.as_bytes()).unwrap(),);
             acc
         });
         assert_eq!(
@@ -221,15 +202,8 @@ Variable(Tail)"#
 
         let mut cursor = QueryCursor::new();
         let matches = completions(&mut cursor, tree.root_node(), text.as_bytes());
-        let res = matches.fold(String::new(), |mut acc, &x| {
-            acc += &format!(
-                "\n{}({})",
-                match x {
-                    COMPLETE::Atom(_) => "Atom",
-                    COMPLETE::Variable(_) => "Variable",
-                },
-                x.utf8_text(text.as_bytes()).unwrap(),
-            );
+        let res = matches.fold(String::new(), |mut acc, (kind, node)| {
+            acc += &format!("\n{kind:?}({})", node.utf8_text(text.as_bytes()).unwrap(),);
             acc
         });
         assert_eq!(

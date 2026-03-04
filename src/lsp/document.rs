@@ -49,16 +49,16 @@ impl Document {
             self.tree.root_node(),
             self.text.text.as_bytes(),
         );
-        if let Some(name) = functions.next() {
-            let function = match name {
-                SEARCH_FUNCTIONS::Function(node) => node,
-                node => bail!("Unexpected node {:?}", node),
+        if let Some(&(kind, node)) = functions.next() {
+            let function = match kind {
+                SEARCH_FUNCTIONS::Function => node,
+                node => bail!("Unexpected node {kind:?} {:?}", node),
             };
 
-            let get_name = |name: &Node| -> anyhow::Result<_> {
+            let get_name = |name: Node| -> anyhow::Result<_> {
                 Ok(name.utf8_text(self.text.text.as_bytes())?.into())
             };
-            let new_function = |name: &Node| -> anyhow::Result<_> {
+            let new_function = |name| -> anyhow::Result<_> {
                 Ok(Function {
                     name: get_name(name)?,
                     parameters: SmallVec::new(),
@@ -68,15 +68,15 @@ impl Document {
             };
 
             let name = new_function(function);
-            let last_function = functions.fold(name, |function, x| {
+            let last_function = functions.fold(name, |function, &(kind, node)| {
                 let mut function = function?;
-                function.declared_args.push(match x {
-                    SEARCH_FUNCTIONS::Function(name) => {
+                function.declared_args.push(match kind {
+                    SEARCH_FUNCTIONS::Function => {
                         self.functions.push(function);
-                        return new_function(name);
+                        return new_function(node);
                     }
-                    SEARCH_FUNCTIONS::Atom(node) => Argument::Atom(get_name(node)?),
-                    SEARCH_FUNCTIONS::Variable(node) => Argument::Variable(get_name(node)?),
+                    SEARCH_FUNCTIONS::Atom => Argument::Atom(get_name(node)?),
+                    SEARCH_FUNCTIONS::Variable => Argument::Variable(get_name(node)?),
                 });
                 Ok(function)
             })?;

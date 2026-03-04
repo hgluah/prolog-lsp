@@ -23,13 +23,12 @@ pub fn completions(pos: GridIndex, document: &Document) -> anyhow::Result<Comple
         document.tree.root_node(),
         document.text.text.as_bytes(),
     )
-    .filter(|node| node.end_position() > pos);
+    .filter(|(_, node)| node.end_position() > pos);
     let node = node.next();
 
-    let default = COMPLETE::Atom(document.tree.root_node()); // The inner node is not going to be used anymore
-    let (node, name) = match node {
-        Some(node) => (node, node.utf8_text(document.text.text.as_bytes())?),
-        None => (&default, ""),
+    let (kind, name) = match node {
+        Some(&(kind, node)) => (kind, node.utf8_text(document.text.text.as_bytes())?),
+        None => (COMPLETE::Atom, ""),
     };
 
     macro_rules! item {
@@ -70,8 +69,8 @@ pub fn completions(pos: GridIndex, document: &Document) -> anyhow::Result<Comple
             .collect())
     }
 
-    let completions = match node {
-        COMPLETE::Atom(_) => filter_prefixed(
+    let completions = match kind {
+        COMPLETE::Atom => filter_prefixed(
             name,
             document.functions.iter().flat_map(|f| {
                 std::iter::chain(
@@ -83,7 +82,7 @@ pub fn completions(pos: GridIndex, document: &Document) -> anyhow::Result<Comple
                 )
             }),
         ),
-        COMPLETE::Variable(_) => filter_prefixed(
+        COMPLETE::Variable => filter_prefixed(
             name,
             document.functions.iter().flat_map(|f| {
                 f.declared_args.iter().filter_map(|arg| match arg {
