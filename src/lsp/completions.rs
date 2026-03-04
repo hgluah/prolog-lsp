@@ -7,6 +7,7 @@ use tree_sitter::{Node, QueryCursor};
 
 use crate::{
     attr_state::{AssetType, TagName, TrunkAttrState},
+    lsp::queries,
     utils::{find_attr, is_attr_name_completion, is_attr_value_completion},
 };
 use texter::{change::GridIndex, core::text::Text};
@@ -256,9 +257,10 @@ impl TrunkAttrState {
     }
 }
 
-pub fn completions(pos: GridIndex, n: Node, text: &Text) -> Option<CompletionResponse> {
+pub fn completions(pos: GridIndex, n: Node, text: &Text) -> CompletionResponse {
     let s = text.text.as_str();
     let mut cursor = QueryCursor::new();
+    queries::completions(&mut cursor, n, s.as_bytes());
     let element_id = COMPLETE_QUERY
         .capture_names()
         .iter()
@@ -282,25 +284,6 @@ pub fn completions(pos: GridIndex, n: Node, text: &Text) -> Option<CompletionRes
     let in_pos = current
         .node
         .named_descendant_for_point_range(prev_pos.into(), pos.into())?;
-
-    // If the current position is not preceeded by a whitespace, we cannot give any attribute
-    // completions so we return early.
-    if s.as_bytes()[in_pos.start_byte()] != b' '
-        && matches!(in_pos.kind(), "self_closing_tag" | "start_tag")
-    {
-        return None;
-    }
-
-    // If the end of the found node is " we shouldn't return a completion as the cursor is after a
-    // quote.
-    let byte_pos = text.br_indexes.row_start(pos.row).unwrap() + pos.col;
-    let prev_byte = s.as_bytes()[byte_pos.saturating_sub(1)];
-    if matches!(prev_byte, b'\'' | b'"')
-        && in_pos.kind() == "quoted_attribute_value"
-        && byte_pos == in_pos.end_byte()
-    {
-        return None;
-    }
 
     let mut cursor = current.node.walk();
     let children = current.node.named_children(&mut cursor);

@@ -50,7 +50,7 @@ fn handle_notification(
                 serde_json::from_value(noti.params)?;
             let (tree, text) = docs.get_mut(&p.text_document.uri).unwrap();
             for ch in p.content_changes.into_iter() {
-                text.update(Change::from(ch), tree)?;
+                text.update(Change::from(ch), &mut tree.tree)?;
             }
         }
         DidOpenTextDocument::METHOD => {
@@ -59,7 +59,10 @@ fn handle_notification(
             let tree = parser
                 .parse(p.text_document.text.as_bytes(), None)
                 .context("Tree not returned during parsing")?;
-            docs.insert(p.text_document.uri, (tree, text_fn(p.text_document.text)));
+            docs.insert(
+                p.text_document.uri,
+                (From::from(tree), text_fn(p.text_document.text)),
+            );
         }
         DidCloseTextDocument::METHOD => {
             let p: <DidCloseTextDocument as Notification>::Params =
@@ -94,12 +97,10 @@ fn handle_request(parser: &mut Parser, req: lsp_server::Request) -> anyhow::Resu
             let (tree, text) = docs
                 .get_mut(&uri)
                 .context("Requested completion for unknown document.")?;
-            *tree = parser.parse(text.text.as_str(), Some(tree)).unwrap();
+            tree.tree = parser.parse(text.text.as_str(), Some(&tree.tree)).unwrap();
             pos.normalize(text)?;
-            return Ok(Response::new_ok(
-                req.id,
-                completions(pos, tree.root_node(), text),
-            ));
+            tree.recompute();
+            return Ok(Response::new_ok(req.id, tree.completions(pos, text)));
         }
         HoverRequest::METHOD => {
             let p: <HoverRequest as Request>::Params = serde_json::from_value(req.params)?;

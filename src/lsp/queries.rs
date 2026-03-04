@@ -1,11 +1,11 @@
-use std::{ops::Not, sync::LazyLock};
+use std::sync::LazyLock;
 
 use tree_sitter::{Node, Query, QueryCursor, StreamingIterator, TextProvider};
 
 macro_rules! query {
     ($QUERY:ident, $query_lit:literal, $($capture:ident: $variant:ident),* $(,)?) => {
         paste::paste! {
-            pub static [<$QUERY _QUERY>]: LazyLock<Query> = LazyLock::new(||
+            static [<$QUERY _QUERY>]: LazyLock<Query> = LazyLock::new(||
                 Query::new(&prolog_grammar::LANGUAGE.into(), $query_lit).unwrap()
             );
             #[allow(non_camel_case_types)]
@@ -32,10 +32,12 @@ macro_rules! query {
                 }
             });
             #[derive(Clone, Copy, Debug)]
+            #[allow(non_camel_case_types)]
             pub enum $QUERY<'tree> {
                 $($variant(Node<'tree>),)*
             }
-            pub fn [<$QUERY _RAW>]<'tree, I: AsRef<[u8]>>(
+            #[allow(non_snake_case)]
+            fn [<$QUERY _RAW>]<'tree, I: AsRef<[u8]>>(
                 cursor: &'tree mut QueryCursor,
                 tree: Node<'tree>,
                 text: impl TextProvider<I>,
@@ -60,7 +62,7 @@ macro_rules! query {
 }
 
 query!(
-    SEARCH,
+    SEARCH_FUNCTIONS,
     r#"
         [
             (functional_notation function: (atom) @function)
@@ -98,14 +100,14 @@ impl<'tree> Iterator for Ascendants<'tree> {
     }
 }
 
-pub fn search<'tree>(
+pub fn search_functions<'tree>(
     cursor: &'tree mut QueryCursor,
     tree: Node<'tree>,
     text: &'tree [u8],
-) -> impl StreamingIterator<Item = SEARCH<'tree>> {
-    SEARCH_RAW(cursor, tree, text)
+) -> impl StreamingIterator<Item = SEARCH_FUNCTIONS<'tree>> {
+    SEARCH_FUNCTIONS_RAW(cursor, tree, text)
         .filter(|node| {
-            !matches!(node, SEARCH::Atom(node) if
+            !matches!(node, SEARCH_FUNCTIONS::Atom(node) if
                 matches!(
                     node.parent(),
                     Some(p) if p.kind() == "functional_notation" && p.child(0).unwrap() == *node,
@@ -114,10 +116,12 @@ pub fn search<'tree>(
         })
         .filter(|node| {
             let function = match node {
-                SEARCH::Atom(node) | SEARCH::Variable(node) => Ascendants(*node)
-                    .filter(|p| p.kind() == "functional_notation")
-                    .next(),
-                SEARCH::Function(function) => Some(function.parent().unwrap()),
+                SEARCH_FUNCTIONS::Atom(node) | SEARCH_FUNCTIONS::Variable(node) => {
+                    Ascendants(*node)
+                        .filter(|p| p.kind() == "functional_notation")
+                        .next()
+                }
+                SEARCH_FUNCTIONS::Function(function) => Some(function.parent().unwrap()),
             };
             match function.and_then(|function| function.parent()) {
                 Some(op) => match op.kind() {
@@ -164,18 +168,19 @@ mod tests {
         let tree = parser.parse(text, None).unwrap();
 
         let mut cursor = QueryCursor::new();
-        let matches = search(&mut cursor, tree.root_node(), text.as_bytes());
+        let matches = search_functions(&mut cursor, tree.root_node(), text.as_bytes());
         let res = matches.fold(String::new(), |mut acc, &x| {
             acc += &format!(
                 "\n{}({})",
                 match x {
-                    SEARCH::Function(_) => "Function",
-                    SEARCH::Atom(_) => "Atom",
-                    SEARCH::Variable(_) => "Variable",
+                    SEARCH_FUNCTIONS::Function(_) => "Function",
+                    SEARCH_FUNCTIONS::Atom(_) => "Atom",
+                    SEARCH_FUNCTIONS::Variable(_) => "Variable",
                 },
                 match x {
-                    SEARCH::Function(node) | SEARCH::Atom(node) | SEARCH::Variable(node) =>
-                        node.utf8_text(text.as_bytes()).unwrap(),
+                    SEARCH_FUNCTIONS::Function(node)
+                    | SEARCH_FUNCTIONS::Atom(node)
+                    | SEARCH_FUNCTIONS::Variable(node) => node.utf8_text(text.as_bytes()).unwrap(),
                 },
             );
             acc
