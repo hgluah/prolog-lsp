@@ -3,6 +3,7 @@ cd "$(dirname "$0")"
 set -euxo pipefail
 
 cargo build --release
+rm -rf vscode/lsp_bin/
 mkdir -p vscode/lsp_bin/
 cp target/release/prolog-lsp vscode/lsp_bin/
 (
