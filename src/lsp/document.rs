@@ -4,77 +4,82 @@ use anyhow::bail;
 use lsp_types::Uri;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
-use tree_sitter::{Node, QueryCursor, StreamingIterator, Tree};
+use smol_str::SmolStr;
+use tree_sitter::{Node, Parser, QueryCursor, StreamingIterator, Tree};
 
-use texter::core::text::Text;
+use texter::{change::GridIndex, core::text::Text};
 
 use crate::lsp::queries::search_functions;
 
 use super::queries::SEARCH_FUNCTIONS;
 
 pub static DOCUMENTS: LazyLock<Mutex<Documents>> = LazyLock::new(Mutex::default);
-type Documents<'tree> = FxHashMap<Uri, Document<'tree>>;
-impl<'tree> TryFrom<(Tree, Text)> for Document<'tree> {
-    type Error = anyhow::Error;
-
-    fn try_from((tree, text): (Tree, Text)) -> Result<Self, Self::Error> {
+type Documents = FxHashMap<Uri, Document>;
+impl Document {
+    pub fn new(tree: Tree, text: Text, parser: &mut Parser) -> anyhow::Result<Self> {
         let mut res = Self {
             tree,
             text,
-            cursor: QueryCursor::new(),
             imports: SmallVec::new(),
             exports: SmallVec::new(),
             functions: SmallVec::new(),
         };
-        res.recompute()?;
+        res.recompute(parser, None)?;
         Ok(res)
     }
-}
-impl<'tree> Document<'tree> {
-    pub fn recompute(&'tree mut self) -> anyhow::Result<()> {
+    pub fn recompute(
+        &mut self,
+        parser: &mut Parser,
+        pos: Option<&mut GridIndex>,
+    ) -> anyhow::Result<()> {
+        self.tree = parser
+            .parse(self.text.text.as_str(), Some(&self.tree))
+            .unwrap();
+        if let Some(pos) = pos {
+            pos.normalize(&mut self.text)?;
+        }
+
         self.imports.clear();
         self.exports.clear();
         self.functions.clear();
 
-        self.cursor = QueryCursor::new();
+        let mut cursor = QueryCursor::new();
         let mut functions = search_functions(
-            &mut self.cursor,
+            &mut cursor,
             self.tree.root_node(),
             self.text.text.as_bytes(),
         );
         if let Some(name) = functions.next() {
-            let &name = match name {
+            let function = match name {
                 SEARCH_FUNCTIONS::Function(node) => node,
                 node => bail!("Unexpected node {:?}", node),
             };
 
-            let last_function = functions.fold(
-                Function {
-                    name,
+            let get_name = |name: &Node| -> anyhow::Result<_> {
+                Ok(name.utf8_text(self.text.text.as_bytes())?.into())
+            };
+            let new_function = |name: &Node| -> anyhow::Result<_> {
+                Ok(Function {
+                    name: get_name(name)?,
                     parameters: SmallVec::new(),
                     declared_args: SmallVec::new(),
                     inner_variables: SmallVec::new(),
-                },
-                |mut function, x| match x {
+                })
+            };
+
+            let name = new_function(function);
+            let last_function = functions.fold(name, |function, x| {
+                let mut function = function?;
+                function.declared_args.push(match x {
                     SEARCH_FUNCTIONS::Function(name) => {
                         self.functions.push(function);
-                        Function {
-                            name: *name,
-                            parameters: SmallVec::new(),
-                            declared_args: SmallVec::new(),
-                            inner_variables: SmallVec::new(),
-                        }
+                        return new_function(name);
                     }
-                    SEARCH_FUNCTIONS::Atom(node) => {
-                        function.declared_args.push(Argument::Atom(*node));
-                        function
-                    }
-                    SEARCH_FUNCTIONS::Variable(node) => {
-                        function.declared_args.push(Argument::Variable(*node));
-                        function
-                    }
-                },
-            );
+                    SEARCH_FUNCTIONS::Atom(node) => Argument::Atom(get_name(node)?),
+                    SEARCH_FUNCTIONS::Variable(node) => Argument::Variable(get_name(node)?),
+                });
+                Ok(function)
+            })?;
 
             self.functions.push(last_function);
         }
@@ -82,21 +87,20 @@ impl<'tree> Document<'tree> {
         Ok(())
     }
 }
-pub struct Document<'tree> {
+pub struct Document {
     pub tree: Tree,
     pub text: Text,
-    cursor: QueryCursor,
-    pub imports: SmallVec<[Node<'tree>; 16]>,
-    pub exports: SmallVec<[Node<'tree>; 32]>,
-    pub functions: SmallVec<[Function<'tree>; 32]>,
+    pub imports: SmallVec<[SmolStr; 16]>,
+    pub exports: SmallVec<[SmolStr; 32]>,
+    pub functions: SmallVec<[Function; 32]>,
 }
-pub struct Function<'tree> {
-    pub name: Node<'tree>,
-    pub parameters: SmallVec<[Node<'tree>; 8]>,
-    pub declared_args: SmallVec<[Argument<'tree>; 8]>,
-    pub inner_variables: SmallVec<[Node<'tree>; 16]>,
+pub struct Function {
+    pub name: SmolStr,
+    pub parameters: SmallVec<[SmolStr; 8]>,
+    pub declared_args: SmallVec<[Argument; 8]>,
+    pub inner_variables: SmallVec<[SmolStr; 16]>,
 }
-pub enum Argument<'tree> {
-    Atom(Node<'tree>),
-    Variable(Node<'tree>),
+pub enum Argument {
+    Atom(SmolStr),
+    Variable(SmolStr),
 }

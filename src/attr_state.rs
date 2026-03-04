@@ -13,23 +13,13 @@ pub struct TrunkAttrState {
     ///
     /// for example `rel=""` is `None` but `rel="css"` is `Some(AssetType::Css)`
     pub rel: Option<AssetType>,
-    pub tag_name: TagName,
 }
 
 impl TrunkAttrState {
     pub fn with_tag_name(tag_name: TagName) -> Self {
         Self {
-            tag_name,
             ..Default::default()
         }
-    }
-
-    pub fn is_rel_val(&self, s: &str, n: Node) -> bool {
-        if self.rel.is_some() {
-            return false;
-        }
-
-        n.utf8_text(s.as_bytes()).is_ok_and(|s| s == "rel")
     }
 
     #[instrument(level = "trace", skip(elem_nodes))]

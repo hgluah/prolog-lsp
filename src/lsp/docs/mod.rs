@@ -18,12 +18,6 @@ pub enum ValueRequirment {
     Values(bool, &'static [(&'static str, &'static str)]),
 }
 
-impl ValueRequirment {
-    pub fn must_have_value(&self) -> bool {
-        matches!(self, Self::Requires(true) | Self::Values(true, ..))
-    }
-}
-
 const DATA_INTEGRITY: (&str, &str, ValueRequirment) = (
     "data-integrity",
     "The hashing algorithm that Trunk will use for integrity checking.",
@@ -50,7 +44,7 @@ const DATA_INTEGRITY: (&str, &str, ValueRequirment) = (
 const DATA_TARGET_PATH: (&str, &str, ValueRequirment) = (
     "data-target-path",
     "Path where the output is placed inside the `dist` dir. If not present, the directory is placed in the dist root. The path must be a relative path without `..`.",
-    ValueRequirment::Requires(true)
+    ValueRequirment::Requires(true),
 );
 
 const DATA_NO_MINIFY: (&str, &str, ValueRequirment) = (

@@ -1,16 +1,5 @@
 use tree_sitter::Node;
 
-pub fn is_attr_name_completion(kind: &str) -> bool {
-    matches!(
-        kind,
-        "self_closing_tag" | "start_tag" | "attribute_name" | "attribute"
-    )
-}
-
-pub fn is_attr_value_completion(kind: &str) -> bool {
-    matches!(kind, "quoted_attribute_value" | "attribute_value")
-}
-
 pub fn find_attr(n: Node) -> Option<Node> {
     let attr_node = match n.kind() {
         "attribute_value" => {

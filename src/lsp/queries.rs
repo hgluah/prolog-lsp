@@ -1,4 +1,4 @@
-use std::sync::LazyLock;
+use std::{ops::Deref, sync::LazyLock};
 
 use tree_sitter::{Node, Query, QueryCursor, StreamingIterator, TextProvider};
 
@@ -35,6 +35,15 @@ macro_rules! query {
             #[allow(non_camel_case_types)]
             pub enum $QUERY<'tree> {
                 $($variant(Node<'tree>),)*
+            }
+            impl<'tree> Deref for $QUERY<'tree> {
+                type Target = Node<'tree>;
+
+                fn deref(&self) -> &Self::Target {
+                    match self {
+                        $(Self::$variant(node) => node,)*
+                    }
+                }
             }
             #[allow(non_snake_case)]
             fn [<$QUERY _RAW>]<'tree, I: AsRef<[u8]>>(
@@ -177,11 +186,7 @@ mod tests {
                     SEARCH_FUNCTIONS::Atom(_) => "Atom",
                     SEARCH_FUNCTIONS::Variable(_) => "Variable",
                 },
-                match x {
-                    SEARCH_FUNCTIONS::Function(node)
-                    | SEARCH_FUNCTIONS::Atom(node)
-                    | SEARCH_FUNCTIONS::Variable(node) => node.utf8_text(text.as_bytes()).unwrap(),
-                },
+                x.utf8_text(text.as_bytes()).unwrap(),
             );
             acc
         });
@@ -223,10 +228,7 @@ Variable(Tail)"#
                     COMPLETE::Atom(_) => "Atom",
                     COMPLETE::Variable(_) => "Variable",
                 },
-                match x {
-                    COMPLETE::Atom(node) | COMPLETE::Variable(node) =>
-                        node.utf8_text(text.as_bytes()).unwrap(),
-                },
+                x.utf8_text(text.as_bytes()).unwrap(),
             );
             acc
         });
