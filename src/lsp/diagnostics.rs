@@ -69,7 +69,8 @@ fn diagnostics_single(documents: &Documents, doc: &Document) -> impl Iterator<It
 
             // O(n^2) but n is so small that it's prob better than having to alloc a map
             !doc.functions_and_facts.iter().any(|function| {
-                (&*function.name) == &**exported && arity.parse() == Ok(function.parameters.len()) // TODO Allow arity to be a hex literal etc
+                (&*function.head.name) == &**exported
+                    && arity.parse() == Ok(function.head.parameters.len()) // TODO Allow arity to be a hex literal etc
             })
         })
         .map(|export| match export {

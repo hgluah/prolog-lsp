@@ -3,8 +3,9 @@ use std::hash;
 use indexmap::IndexSet;
 use lsp_types::{CompletionItem, CompletionItemKind, CompletionResponse};
 use rustc_hash::FxBuildHasher;
+use smallvec::SmallVec;
 use streaming_iterator::StreamingIterator;
-use tree_sitter::QueryCursor;
+use tree_sitter::{Node, QueryCursor};
 
 use crate::lsp::{
     document::Document,
@@ -26,22 +27,11 @@ pub fn completions(pos: GridIndex, document: &Document) -> anyhow::Result<Comple
     .filter(|(_, node)| node.end_position() > pos);
     let node = node.next();
 
-    let (kind, name) = match node {
-        Some(&(kind, node)) => (kind, {
-            let mut range = node.start_byte()..node.end_byte();
-            if let Some(row_start) = document.text.br_indexes.row_start(pos.row) {
-                range.end = (row_start + pos.column).clamp(range.start, range.end);
-            };
-            str::from_utf8(&document.text.text.as_bytes()[range])?
-        }),
-        None => (COMPLETE::Atom, ""),
-    };
-
     macro_rules! item {
-        ($name:expr, $kind:ident) => {
+        ($name:expr, $kind:expr) => {
             CompletionItem {
-                label: $name,
-                kind: Some(CompletionItemKind::$kind),
+                label: $name.into(),
+                kind: Some($kind),
                 ..Default::default()
             }
         };
@@ -75,30 +65,98 @@ pub fn completions(pos: GridIndex, document: &Document) -> anyhow::Result<Comple
             .collect())
     }
 
-    // TODO Rework based on parameters
-    let completions = match kind {
-        COMPLETE::Atom => filter_prefixed(
+    fn index_in_parent(mut node: Node) -> usize {
+        let mut index = 0;
+        while let Some(prev) = node.prev_sibling() {
+            index += 1;
+            node = prev;
+        }
+        index
+    }
+
+    let (kind, node, name) = match node {
+        Some(&(kind, node)) => (kind, Some(node), {
+            let mut range = node.start_byte()..node.end_byte();
+            if let Some(row_start) = document.text.br_indexes.row_start(pos.row) {
+                range.end = (row_start + pos.column).clamp(range.start, range.end);
+            };
+            str::from_utf8(&document.text.text.as_bytes()[range])?
+        }),
+        None => (COMPLETE::Atom, None, ""),
+    };
+
+    let mut indices = SmallVec::<[usize; 8]>::new();
+    let function = 'ok: {
+        'err: {
+            if let Some(node) = node {
+                let mut tmp = node;
+                while {
+                    indices.push(index_in_parent(tmp));
+                    tmp = match tmp.parent() {
+                        Some(tmp) => tmp,
+                        None => break 'err,
+                    };
+                    tmp.kind() != "functional_notation"
+                } {}
+                break 'ok tmp;
+            }
+        }
+        return Ok(CompletionResponse::Array(filter_prefixed(
             name,
-            document.functions_and_facts.iter().flat_map(|f| {
-                std::iter::chain(
-                    Some(item!((&*f.name).to_owned(), FUNCTION)),
-                    f.declared_args.iter().filter_map(|arg| match arg {
-                        Argument::Atom(name) => Some(item!((&**name).to_owned(), CONSTANT)),
-                        _ => None,
-                    }),
+            // TODO Also add imports
+            document.functions_and_facts.iter().map(|function| {
+                item!(
+                    (&*function.head.name).to_owned(),
+                    CompletionItemKind::FUNCTION
                 )
             }),
-        ),
-        COMPLETE::Variable => filter_prefixed(
-            name,
-            document.functions_and_facts.iter().flat_map(|f| {
-                f.declared_args.iter().filter_map(|arg| match arg {
-                    Argument::Variable(name) => Some(item!((&**name).to_owned(), VARIABLE)),
-                    _ => None,
-                })
-            }),
-        ),
-    }?;
+        )?));
+    };
 
-    Ok(CompletionResponse::Array(completions))
+    let function_name = function.child_by_field_name("function").unwrap();
+    if function_name.kind() != "atom" || function_name.child_count() != 0 {
+        todo!() // TODO
+    }
+    let function_name = function_name.utf8_text(&document.text.text.as_bytes())?;
+
+    // TODO Also add imports
+    let completions = document.functions_and_facts.iter().filter_map(|function| {
+        if &*function.head.name == function_name {
+            let mut indices = indices.iter().copied().rev();
+            let mut param = function.head.parameters.get(indices.next().unwrap())?;
+            for index in indices {
+                let Argument::List(_, args) = param else {
+                    return None;
+                };
+                param = args.get(index)?;
+            }
+            Some(param)
+        } else {
+            None
+        }
+    });
+
+    Ok(CompletionResponse::Array(filter_prefixed(
+        name,
+        completions.map(|arg| {
+            item!(
+                match arg {
+                    Argument::Number(node) => &**node,
+                    Argument::Atom(node) => &**node,
+                    Argument::String(node) => &**node,
+                    Argument::Variable(node) => &**node,
+                    Argument::List(_, _) => "[",
+                    Argument::Function(node) => &*node.name,
+                },
+                match arg {
+                    Argument::Number(_) => CompletionItemKind::VALUE,
+                    Argument::Atom(_) => CompletionItemKind::CONSTANT,
+                    Argument::String(_) => CompletionItemKind::TEXT,
+                    Argument::Variable(_) => CompletionItemKind::VARIABLE,
+                    Argument::List(_, _) => CompletionItemKind::SNIPPET,
+                    Argument::Function(_) => CompletionItemKind::FUNCTION,
+                }
+            )
+        }),
+    )?))
 }

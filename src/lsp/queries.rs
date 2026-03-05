@@ -88,6 +88,19 @@ query!(
 );
 
 query!(
+    @node-filter m => true,
+    CLAUSES,
+    r#"[
+        (clause_term (atom) @atom)
+        (clause_term (functional_notation) @function)
+        (clause_term (operator_notation) @op)
+    ]"#,
+    atom: Atom,
+    function: Function,
+    op: Op,
+);
+
+query!(
     SEARCH_FUNCTIONS,
     r#"
         [
@@ -188,6 +201,14 @@ pub fn module<'tree>(
         })
 }
 
+pub fn clauses<'tree, I: AsRef<[u8]>>(
+    cursor: &'tree mut QueryCursor,
+    tree: Node<'tree>,
+    text: impl TextProvider<I>,
+) -> impl StreamingIterator<Item = (CLAUSES, Node<'tree>)> {
+    CLAUSES_RAW(cursor, tree, text)
+}
+
 pub fn search_functions<'tree>(
     cursor: &'tree mut QueryCursor,
     tree: Node<'tree>,
@@ -227,6 +248,7 @@ pub fn completions<'tree, I: AsRef<[u8]>>(
     tree: Node<'tree>,
     text: impl TextProvider<I>,
 ) -> impl StreamingIterator<Item = (COMPLETE, Node<'tree>)> {
+    // TODO we should complete on any argument + function_names, not just on atoms + variables
     COMPLETE_RAW(cursor, tree, text)
 }
 
