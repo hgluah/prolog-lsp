@@ -75,6 +75,7 @@ pub fn completions(pos: GridIndex, document: &Document) -> anyhow::Result<Comple
             .collect())
     }
 
+    // TODO Rework based on parameters
     let completions = match kind {
         COMPLETE::Atom => filter_prefixed(
             name,
@@ -83,7 +84,7 @@ pub fn completions(pos: GridIndex, document: &Document) -> anyhow::Result<Comple
                     Some(item!((&*f.name).to_owned(), FUNCTION)),
                     f.declared_args.iter().filter_map(|arg| match arg {
                         Argument::Atom(name) => Some(item!((&**name).to_owned(), CONSTANT)),
-                        Argument::Variable(_) => None,
+                        _ => None,
                     }),
                 )
             }),
@@ -92,8 +93,8 @@ pub fn completions(pos: GridIndex, document: &Document) -> anyhow::Result<Comple
             name,
             document.functions_and_facts.iter().flat_map(|f| {
                 f.declared_args.iter().filter_map(|arg| match arg {
-                    Argument::Atom(_) => None,
                     Argument::Variable(name) => Some(item!((&**name).to_owned(), VARIABLE)),
+                    _ => None,
                 })
             }),
         ),

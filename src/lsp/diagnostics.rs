@@ -1,7 +1,6 @@
 use either::Either;
 use lsp_types::{Diagnostic, DiagnosticSeverity, PublishDiagnosticsParams, Range, Uri};
 use texter::change::GridIndex;
-use tracing::warn;
 use tree_sitter_traversal::traverse_tree;
 
 use crate::lsp::document::{Document, Documents};
@@ -88,6 +87,12 @@ fn diagnostics_single(documents: &Documents, doc: &Document) -> impl Iterator<It
             },
         });
 
+    // TODO Unused variable
+    // TODO Non existent variable
+    // TODO Invalid argument
+    // TODO X is <non arith expr>
+    // TODO X = <non num/atom/str/variable expr>
+
     std::iter::chain(
         sintactic,
         std::iter::chain(multiple_exports, non_existant_exports),
@@ -98,18 +103,16 @@ pub fn diagnostics(
     documents: &Documents,
     uri: Uri,
 ) -> impl IntoIterator<Item = PublishDiagnosticsParams> {
+    let main_doc = documents.get(&uri).unwrap();
     let diagnostics = std::iter::chain(
-        Some((
-            uri.clone(),
-            diagnostics_single(documents, &documents.get(&uri).unwrap()),
-        )),
+        Some((uri.clone(), diagnostics_single(documents, main_doc))),
         documents
             .iter()
             .filter(move |(_, document)| {
                 document.imports.iter().any(|import| {
-                    let uri = uri.as_str().as_bytes();
-                    let import = import.as_bytes();
-                    uri.ends_with(import) && uri.get(uri.len() - import.len()) == Some(&b'/')
+                    main_doc.exports.iter().any(
+                        |module| matches!(module, Ok(module) if &*module.module_name == &**import),
+                    )
                 })
             })
             .map(|(uri, document)| (uri.clone(), diagnostics_single(documents, document))),

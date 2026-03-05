@@ -1,7 +1,4 @@
-use std::{
-    ops::Deref,
-    sync::{LazyLock, Mutex},
-};
+use std::ops::Deref;
 
 use anyhow::bail;
 use lsp_types::{Range, Uri};
@@ -122,7 +119,7 @@ impl Document {
 pub struct Document {
     pub tree: Tree,
     pub text: Text,
-    pub imports: SmallVec<[MiniNode; 16]>,
+    pub imports: SmallVec<[MiniNode; 16]>, // TODO Construct
     pub exports: SmallVec<[Result<Exports, MiniNode>; 1]>,
     pub functions_and_facts: SmallVec<[FunctionOrFact; 32]>,
 }
@@ -132,13 +129,17 @@ pub struct Exports {
 }
 pub struct FunctionOrFact {
     pub name: MiniNode,
-    pub parameters: SmallVec<[MiniNode; 8]>,
+    pub parameters: SmallVec<[Argument; 8]>,
     pub declared_args: SmallVec<[Argument; 8]>,
-    pub inner_variables: SmallVec<[MiniNode; 16]>,
+    pub inner_variables: SmallVec<[MiniNode; 16]>, // TODO
 }
 pub enum Argument {
+    Number(MiniNode),
     Atom(MiniNode),
+    String(MiniNode),
     Variable(MiniNode),
+    List(Range, Vec<Argument>),
+    Function(Box<FunctionOrFact>),
 }
 #[derive(Clone, Debug)]
 pub struct MiniNode {

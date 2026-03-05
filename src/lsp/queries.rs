@@ -1,6 +1,5 @@
 use std::sync::LazyLock;
 
-use lsp_types::Range;
 use smallvec::SmallVec;
 use smol_str::SmolStr;
 use tree_sitter::{Node, Query, QueryCursor, StreamingIterator, TextProvider};
