@@ -78,11 +78,11 @@ pub fn completions(pos: GridIndex, document: &Document) -> anyhow::Result<Comple
     let completions = match kind {
         COMPLETE::Atom => filter_prefixed(
             name,
-            document.functions.iter().flat_map(|f| {
+            document.functions_and_facts.iter().flat_map(|f| {
                 std::iter::chain(
-                    Some(item!(f.name.as_str().to_owned(), FUNCTION)),
+                    Some(item!((&*f.name).to_owned(), FUNCTION)),
                     f.declared_args.iter().filter_map(|arg| match arg {
-                        Argument::Atom(name) => Some(item!(name.as_str().to_owned(), CONSTANT)),
+                        Argument::Atom(name) => Some(item!((&**name).to_owned(), CONSTANT)),
                         Argument::Variable(_) => None,
                     }),
                 )
@@ -90,10 +90,10 @@ pub fn completions(pos: GridIndex, document: &Document) -> anyhow::Result<Comple
         ),
         COMPLETE::Variable => filter_prefixed(
             name,
-            document.functions.iter().flat_map(|f| {
+            document.functions_and_facts.iter().flat_map(|f| {
                 f.declared_args.iter().filter_map(|arg| match arg {
                     Argument::Atom(_) => None,
-                    Argument::Variable(name) => Some(item!(name.as_str().to_owned(), VARIABLE)),
+                    Argument::Variable(name) => Some(item!((&**name).to_owned(), VARIABLE)),
                 })
             }),
         ),

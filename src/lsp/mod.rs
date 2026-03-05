@@ -5,7 +5,6 @@ pub mod queries;
 mod references;
 
 use anyhow::Context;
-use document::DOCUMENTS;
 use lsp_server::{Connection, Message, Response};
 use lsp_types::{
     Uri,
@@ -21,7 +20,9 @@ use tree_sitter::Parser;
 use crate::{
     init::TextFn,
     lsp::{
-        completions::completions, diagnostics::diagnostics, document::Document,
+        completions::completions,
+        diagnostics::diagnostics,
+        document::{Document, Documents},
         references::references,
     },
 };
@@ -30,16 +31,19 @@ use texter::change::{Change, GridIndex};
 pub fn main_loop(text_fn: TextFn, con: Connection) -> anyhow::Result<()> {
     let mut parser = Parser::new();
     parser.set_language(&prolog_grammar::LANGUAGE.into())?;
+
+    let mut docs = Documents::default();
+
     for msg in con.receiver {
         match msg {
             Message::Notification(noti) => {
-                if let Some(iter) = handle_notification(&mut parser, text_fn, noti)? {
+                if let Some(iter) = handle_notification(&mut docs, &mut parser, text_fn, noti)? {
                     iter.map(Message::Notification)
                         .try_for_each(|response| con.sender.send(response))?;
                 }
             }
             Message::Request(req) => {
-                let response = Message::Response(handle_request(&mut parser, req)?);
+                let response = Message::Response(handle_request(&mut docs, &mut parser, req)?);
                 con.sender.send(response)?;
             }
             Message::Response(_) => unreachable!(),
@@ -50,11 +54,11 @@ pub fn main_loop(text_fn: TextFn, con: Connection) -> anyhow::Result<()> {
 }
 
 fn handle_notification(
+    docs: &mut Documents,
     parser: &mut Parser,
     text_fn: TextFn,
     noti: lsp_server::Notification,
 ) -> anyhow::Result<Option<impl Iterator<Item = lsp_server::Notification>>> {
-    let mut docs = DOCUMENTS.lock().unwrap();
     Ok(match &*noti.method {
         DidChangeTextDocument::METHOD => {
             let p: <DidChangeTextDocument as Notification>::Params =
@@ -74,7 +78,7 @@ fn handle_notification(
                 .get_mut(&p.text_document.uri)
                 .context("Saved unknown document.")?;
             document.recompute(parser, None)?;
-            Some(diagnostics(&docs, p.text_document.uri).into_iter().map(
+            Some(diagnostics(docs, p.text_document.uri).into_iter().map(
                 |res: <PublishDiagnostics as Notification>::Params| {
                     lsp_server::Notification::new(PublishDiagnostics::METHOD.to_owned(), res)
                 },
@@ -110,8 +114,11 @@ fn handle_notification(
     })
 }
 
-fn handle_request(parser: &mut Parser, req: lsp_server::Request) -> anyhow::Result<Response> {
-    let mut docs = DOCUMENTS.lock().unwrap();
+fn handle_request(
+    docs: &mut Documents,
+    parser: &mut Parser,
+    req: lsp_server::Request,
+) -> anyhow::Result<Response> {
     Ok(match &*req.method {
         Completion::METHOD => {
             let p: <Completion as Request>::Params = serde_json::from_value(req.params)?;

@@ -1,9 +1,19 @@
 use std::sync::LazyLock;
 
+use lsp_types::Range;
+use smallvec::SmallVec;
+use smol_str::SmolStr;
 use tree_sitter::{Node, Query, QueryCursor, StreamingIterator, TextProvider};
+
+use crate::lsp::document::MiniNode;
 
 macro_rules! query {
     ($QUERY:ident, $query_lit:literal, $($capture:ident: $variant:ident),* $(,)?) => {
+        query!(
+            @node-filter m => m.node.child_count() == 0, $QUERY, $query_lit, $($capture: $variant),*
+        );
+    };
+    (@node-filter $node_filter_id:ident => $node_filter:expr, $QUERY:ident, $query_lit:literal, $($capture:ident: $variant:ident),* $(,)?) => {
         paste::paste! {
             static [<$QUERY _QUERY>]: LazyLock<Query> = LazyLock::new(||
                 Query::new(&prolog_grammar::LANGUAGE.into(), $query_lit).unwrap()
@@ -48,10 +58,10 @@ macro_rules! query {
                         [m] => m,
                         _ => unreachable!(),
                     })
-                    .filter_map(|m| match m.index {
+                    .filter_map(|$node_filter_id| match $node_filter_id.index {
                         $(
                             id if id == [<$QUERY _VARS>].$capture => {
-                                (m.node.child_count() == 0).then_some(($QUERY::$variant, m.node))
+                                ($node_filter).then_some(($QUERY::$variant, $node_filter_id.node))
                             }
                         )*
                         _ => unreachable!(),
@@ -69,6 +79,13 @@ query!(
         ]
     "#,
     name: Ident,
+);
+
+query!(
+    @node-filter m => true,
+    DIRECTIVE,
+    r#"(directive_term (functional_notation) @directive)"#,
+    directive: Directive,
 );
 
 query!(
@@ -116,6 +133,60 @@ pub fn idents<'tree, I: AsRef<[u8]>>(
     text: impl TextProvider<I>,
 ) -> impl StreamingIterator<Item = Node<'tree>> {
     IDENT_RAW(cursor, tree, text).map(|&(IDENT::Ident, x)| x)
+}
+
+pub fn module<'tree>(
+    cursor: &'tree mut QueryCursor,
+    tree: Node<'tree>,
+    text: &'tree [u8],
+) -> impl StreamingIterator<
+    Item = Result<(Node<'tree>, SmallVec<[(Node<'tree>, Node<'tree>); 32]>), MiniNode>,
+> {
+    DIRECTIVE_RAW(cursor, tree, text)
+        .map(|&(DIRECTIVE::Directive, x)| x)
+        .filter(|module| {
+            module.child_by_field_name("function").is_some_and(|atom| {
+                atom.kind() == "atom"
+                    && atom.child_count() == 0
+                    && atom.utf8_text(text) == Ok("module")
+            })
+        })
+        .map(|&module| {
+            'err: {
+                if let Some(args) = module.child(2 /* arg_list */)
+                    && args.kind() == "arg_list" && args.child_count() == 3 {
+                    let module_name = args.child(0).unwrap();
+                    let exported = args.child(2).unwrap();
+
+                    if module_name.kind() != "atom"
+                        || module_name.child_count() != 0
+                        || exported.kind() != "list_notation" {
+                        break 'err;
+                    }
+                    let mut res = SmallVec::new();
+                    for arg in exported.children(&mut exported.walk()).skip(1).step_by(2) {
+                        if arg.kind() != "operator_notation"
+                            || arg.child_count() != 3
+                            || arg.child_by_field_name("operator").unwrap().utf8_text(text) != Ok("/") {
+                            break 'err;
+                        }
+                        let function_name = arg.child(0).unwrap();
+                        let arity = arg.child(2).unwrap();
+                        if function_name.kind() != "atom"
+                            || module_name.child_count() != 0
+                            || arity.kind() != "integer" {
+                            break 'err;
+                        }
+                        res.push((function_name, arity));
+                    }
+                    return Ok((module_name, res))
+                }
+            }
+            Err(MiniNode::at(
+                module,
+                SmolStr::new_static("Arguments of `module` must be the module name and a list of 'function-name/arity' nodes"),
+            ))
+        })
 }
 
 pub fn search_functions<'tree>(
@@ -167,6 +238,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_module() {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&prolog_grammar::LANGUAGE.into())
+            .unwrap();
+
+        let text = r#"
+                :- module(doggos, [
+                    is_dog/1,
+                    my_dogs/2
+                ]).
+
+                is_dog(dog).
+                my_dogs(dog1, dog2).
+            "#;
+        let tree = parser.parse(text, None).unwrap();
+
+        let mut cursor = QueryCursor::new();
+        let matches = module(&mut cursor, tree.root_node(), text.as_bytes());
+        let res = matches.fold(String::new(), |mut acc, node| {
+            let (module_name, exported) = node.as_ref().unwrap();
+            let module_name = module_name.utf8_text(text.as_bytes()).unwrap();
+            let exported = exported
+                .iter()
+                .map(|(function, arity)| {
+                    format!(
+                        "{}/{}, ",
+                        function.utf8_text(text.as_bytes()).unwrap(),
+                        arity.utf8_text(text.as_bytes()).unwrap(),
+                    )
+                })
+                .fold(String::new(), |acc, x| acc + &x);
+            acc += &format!("\n{}({})", module_name, exported);
+            acc
+        });
+        assert_eq!(
+            res,
+            r#"
+doggos(is_dog/1, my_dogs/2, )"#
+        );
+    }
+
+    #[test]
     fn test_search() {
         let mut parser = Parser::new();
         parser
@@ -186,7 +300,7 @@ mod tests {
         let mut cursor = QueryCursor::new();
         let matches = search_functions(&mut cursor, tree.root_node(), text.as_bytes());
         let res = matches.fold(String::new(), |mut acc, (kind, node)| {
-            acc += &format!("\n{kind:?}({})", node.utf8_text(text.as_bytes()).unwrap(),);
+            acc += &format!("\n{kind:?}({})", node.utf8_text(text.as_bytes()).unwrap());
             acc
         });
         assert_eq!(
@@ -221,7 +335,7 @@ Variable(Tail)"#
         let mut cursor = QueryCursor::new();
         let matches = completions(&mut cursor, tree.root_node(), text.as_bytes());
         let res = matches.fold(String::new(), |mut acc, (kind, node)| {
-            acc += &format!("\n{kind:?}({})", node.utf8_text(text.as_bytes()).unwrap(),);
+            acc += &format!("\n{kind:?}({})", node.utf8_text(text.as_bytes()).unwrap());
             acc
         });
         assert_eq!(
