@@ -74,7 +74,7 @@ pub fn completions(pos: GridIndex, document: &Document) -> anyhow::Result<Comple
         index
     }
 
-    let (kind, node, name) = match node {
+    let (_kind, node, name) = match node {
         Some(&(kind, node)) => (kind, Some(node), {
             let mut range = node.start_byte()..node.end_byte();
             if let Some(row_start) = document.text.br_indexes.row_start(pos.row) {

@@ -1,17 +1,17 @@
 use std::ops::Deref;
 
-use anyhow::{Context, bail};
 use lsp_types::{Range, Uri};
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use smol_str::SmolStr;
+use tracing::info;
 use tree_sitter::{Node, Parser, QueryCursor, StreamingIterator, Tree};
 
 use texter::{change::GridIndex, core::text::Text};
 
-use crate::lsp::queries::{clauses, module, search_functions};
+use crate::lsp::queries::{clauses, module};
 
-use super::queries::{CLAUSES, SEARCH_FUNCTIONS};
+use super::queries::CLAUSES;
 
 pub type Documents = FxHashMap<Uri, Document>;
 impl Document {
@@ -106,6 +106,8 @@ impl Document {
             }),
         );
 
+        info!("{self:#?}");
+
         Ok(())
     }
 
@@ -122,7 +124,7 @@ impl Document {
                 node.children(&mut cursor)
                     .skip(1)
                     .step_by(2)
-                    .map(|child| Self::parse_arg(child, &text))
+                    .map(|child| Self::parse_arg(child, text.as_ref()))
                     .collect::<Result<_, _>>()?
             }),
             "functional_notation" => Function(Box::new(Self::parse_funtion_head(node, text)?)),
@@ -131,30 +133,48 @@ impl Document {
     }
 
     fn parse_funtion_head(
-        node: Node,
+        function: Node,
         text: impl AsRef<[u8]>,
     ) -> anyhow::Result<FunctionHeadOrFact> {
-        let function = node.child(0).unwrap();
-        if node.kind() != "functional_notation" || node.child_count() != 4 {
-            return Err(todo!()); // TODO
+        if function.kind() != "functional_notation" || function.child_count() != 4 {
+            // TODO
+            /*
+            test1(X):-
+                write(X) % <--- THERE IS NO FINAL .
+
+            :-
+                test1(hello).
+             */
+            return Err(todo!(
+                "{:#}",
+                function.parent().unwrap().utf8_text(text.as_ref()).unwrap()
+            ));
         }
         let function_name = function.child_by_field_name("function").unwrap();
         let args = function.child(2).unwrap();
-        if node.kind() != "atom" || node.child_count() != 0 || args.kind() != "arg_list" {
+        if function_name.kind() != "atom"
+            || function_name.child_count() != 0
+            || args.kind() != "arg_list"
+        {
             return Err(todo!()); // TODO
         }
 
         let mut cursor = args.walk();
 
         Ok(FunctionHeadOrFact {
-            name: MiniNode::new(function_name, &text).unwrap_or_else(|_| todo!() /* TODO */),
-            parameters: args
-                .children(&mut cursor)
-                .map(|arg| Self::parse_arg(arg, &text))
-                .collect::<Result<_, _>>()?,
+            name: MiniNode::new(function_name, text.as_ref())
+                .unwrap_or_else(|_| todo!() /* TODO */),
+            parameters: {
+                let mut res = SmallVec::new();
+                for arg in args.children(&mut cursor).step_by(2) {
+                    res.push(Self::parse_arg(arg, text.as_ref())?);
+                }
+                res
+            },
         })
     }
 }
+#[derive(Debug)]
 pub struct Document {
     pub tree: Tree,
     pub text: Text,
@@ -162,18 +182,22 @@ pub struct Document {
     pub exports: SmallVec<[Result<Exports, MiniNode>; 1]>,
     pub functions_and_facts: SmallVec<[FunctionOrFact; 32]>,
 }
+#[derive(Debug)]
 pub struct Exports {
     pub module_name: MiniNode,
     pub exported: SmallVec<[(MiniNode, MiniNode); 32]>,
 }
+#[derive(Debug)]
 pub struct FunctionHeadOrFact {
     pub name: MiniNode,
     pub parameters: SmallVec<[Argument; 8]>,
 }
+#[derive(Debug)]
 pub struct FunctionOrFact {
     pub head: FunctionHeadOrFact,
     pub inner_variables: SmallVec<[MiniNode; 16]>, // TODO
 }
+#[derive(Debug)]
 pub enum Argument {
     Number(MiniNode),
     Atom(MiniNode),

@@ -5,7 +5,7 @@ use tree_sitter_traversal::traverse_tree;
 
 use crate::lsp::document::{Document, Documents};
 
-fn diagnostics_single(documents: &Documents, doc: &Document) -> impl Iterator<Item = Diagnostic> {
+fn diagnostics_single(_documents: &Documents, doc: &Document) -> impl Iterator<Item = Diagnostic> {
     let sintactic = traverse_tree(&doc.tree, tree_sitter_traversal::Order::Post)
         .filter(|node| node.is_error() || node.is_missing())
         .map(|node| Diagnostic {
