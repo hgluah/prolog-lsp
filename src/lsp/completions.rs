@@ -8,7 +8,7 @@ use streaming_iterator::StreamingIterator;
 use tracing::warn;
 use tree_sitter::{Node, Point};
 
-use crate::lsp::document::Document;
+use crate::lsp::{document::Document, queries::Ancestors};
 use texter::change::GridIndex;
 
 use super::document::Argument;
@@ -81,7 +81,6 @@ pub fn completions(pos: GridIndex, document: &Document) -> anyhow::Result<Comple
     }
 
     let pos = pos.into();
-
     let node = last_non_close_in_pos(document.tree.root_node(), pos);
 
     let mut offset = 0;
@@ -127,29 +126,37 @@ pub fn completions(pos: GridIndex, document: &Document) -> anyhow::Result<Comple
     };
 
     let mut indices = SmallVec::<[usize; 8]>::new();
-    let function = 'ok: {
-        'err: {
-            let mut tmp = node;
-            while {
-                indices.push(index_in_parent(tmp));
-                tmp = match tmp.parent() {
-                    Some(tmp) => tmp,
-                    None => break 'err,
-                };
-                tmp.kind() != "arg_list"
-            } {}
-            break 'ok tmp.parent().unwrap();
+    let function = {
+        let last_arg_list = std::iter::chain(Some(node), Ancestors(node)).fold(
+            (0, 0, None),
+            |(idx, last_arg_list_idx, last_arg_list), ancestor| {
+                if ancestor.kind() == "arg_list" {
+                    (idx, idx, Some(ancestor))
+                } else {
+                    indices.push(index_in_parent(ancestor));
+                    (idx + 1, last_arg_list_idx, last_arg_list)
+                }
+            },
+        );
+        match last_arg_list {
+            (_, last_arg_list_idx, Some(last_arg_list)) => {
+                indices.drain(last_arg_list_idx..);
+                warn!("{indices:?} - {:#}", last_arg_list);
+                last_arg_list.parent().unwrap()
+            }
+            (_, _, None) => {
+                return Ok(CompletionResponse::Array(filter_prefixed(
+                    name,
+                    // TODO Also add imports
+                    document.functions_and_facts.iter().map(|function| {
+                        item!(
+                            (&*function.head.name).to_owned(),
+                            CompletionItemKind::FUNCTION
+                        )
+                    }),
+                )?));
+            }
         }
-        return Ok(CompletionResponse::Array(filter_prefixed(
-            name,
-            // TODO Also add imports
-            document.functions_and_facts.iter().map(|function| {
-                item!(
-                    (&*function.head.name).to_owned(),
-                    CompletionItemKind::FUNCTION
-                )
-            }),
-        )?));
     };
 
     let function_name = function.child_by_field_name("function").unwrap();
@@ -167,10 +174,11 @@ pub fn completions(pos: GridIndex, document: &Document) -> anyhow::Result<Comple
                 .parameters
                 .get((indices.next().unwrap() + offset) / 2)?;
             for index in indices {
-                let Argument::List(_, args) = param else {
-                    return None;
+                param = match param {
+                    Argument::List(_, args) => args.get(index / 2)?,
+                    Argument::Function(node) => node.parameters.get((index + offset) / 2)?,
+                    _ => return None,
                 };
-                param = args.get(index / 2)?;
             }
             Some(param)
         } else {
