@@ -126,16 +126,13 @@ query!(
     var: Variable,
 );
 
-struct Ascendants<'tree>(Node<'tree>);
-impl<'tree> Iterator for Ascendants<'tree> {
+pub struct Ancestors<'tree>(pub Node<'tree>);
+impl<'tree> Iterator for Ancestors<'tree> {
     type Item = Node<'tree>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let res = self.0.parent();
-        if let Some(res) = res {
-            self.0 = res;
-        }
-        res
+        self.0 = self.0.parent()?;
+        Some(self.0)
     }
 }
 
@@ -226,7 +223,7 @@ pub fn search_functions<'tree>(
         .filter(|(kind, node)| {
             let function = match kind {
                 SEARCH_FUNCTIONS::Atom | SEARCH_FUNCTIONS::Variable => {
-                    Ascendants(*node).find(|p| p.kind() == "functional_notation")
+                    Ancestors(*node).find(|p| p.kind() == "functional_notation")
                 }
                 SEARCH_FUNCTIONS::Function => Some(node.parent().unwrap()),
             };

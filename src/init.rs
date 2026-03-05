@@ -30,7 +30,7 @@ pub fn initialize_result(p: &InitializeParams) -> (TextFn, InitializeResult) {
                 TextDocumentSyncKind::INCREMENTAL,
             )),
             completion_provider: Some(CompletionOptions {
-                trigger_characters: Some(["(", "["].map(str::to_owned).into()),
+                trigger_characters: Some(["(", "[", ","].map(str::to_owned).into()),
                 ..Default::default()
             }),
             references_provider: Some(OneOf::Left(true)),

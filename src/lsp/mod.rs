@@ -59,6 +59,10 @@ fn handle_notification(
     text_fn: TextFn,
     noti: lsp_server::Notification,
 ) -> anyhow::Result<Option<impl Iterator<Item = lsp_server::Notification>>> {
+    let publish_diagnostics = |res: <PublishDiagnostics as Notification>::Params| {
+        lsp_server::Notification::new(PublishDiagnostics::METHOD.to_owned(), res)
+    };
+
     Ok(match &*noti.method {
         DidChangeTextDocument::METHOD => {
             let p: <DidChangeTextDocument as Notification>::Params =
@@ -78,11 +82,11 @@ fn handle_notification(
                 .get_mut(&p.text_document.uri)
                 .context("Saved unknown document.")?;
             document.recompute(parser, None)?;
-            Some(diagnostics(docs, p.text_document.uri).into_iter().map(
-                |res: <PublishDiagnostics as Notification>::Params| {
-                    lsp_server::Notification::new(PublishDiagnostics::METHOD.to_owned(), res)
-                },
-            ))
+            Some(
+                diagnostics(docs, p.text_document.uri)
+                    .into_iter()
+                    .map(publish_diagnostics),
+            )
         }
         DidOpenTextDocument::METHOD => {
             let p: <DidOpenTextDocument as Notification>::Params =
@@ -90,11 +94,15 @@ fn handle_notification(
             let tree = parser
                 .parse(p.text_document.text.as_bytes(), None)
                 .context("Tree not returned during parsing")?;
-            docs.insert(
-                p.text_document.uri,
-                Document::new(tree, text_fn(p.text_document.text), parser)?,
-            );
-            None
+            docs.entry(p.text_document.uri.clone())
+                .insert_entry(Document::new(tree, text_fn(p.text_document.text), parser)?)
+                .get_mut()
+                .recompute(parser, None)?;
+            Some(
+                diagnostics(docs, p.text_document.uri)
+                    .into_iter()
+                    .map(publish_diagnostics),
+            )
         }
         DidCloseTextDocument::METHOD => {
             let p: <DidCloseTextDocument as Notification>::Params =
