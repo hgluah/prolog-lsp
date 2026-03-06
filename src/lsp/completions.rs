@@ -1,11 +1,12 @@
-use std::hash;
+use std::{fmt::Write, hash};
 
 use indexmap::IndexSet;
-use lsp_types::{CompletionItem, CompletionItemKind, CompletionResponse};
+use lsp_types::{
+    CompletionItem, CompletionItemKind, CompletionItemLabelDetails, CompletionResponse,
+    Documentation, InsertTextFormat,
+};
 use rustc_hash::FxBuildHasher;
 use smallvec::SmallVec;
-use streaming_iterator::StreamingIterator;
-use tracing::warn;
 use tree_sitter::{Node, Point};
 
 use crate::lsp::{document::Document, queries::Ancestors};
@@ -15,41 +16,57 @@ use super::document::Argument;
 
 pub fn completions(pos: GridIndex, document: &Document) -> anyhow::Result<CompletionResponse> {
     macro_rules! item {
-        ($name:expr, $kind:expr) => {
-            CompletionItem {
-                label: $name.into(),
+        ($name:expr, $description:expr, $kind:expr, $snippet:expr) => {{
+            let insert_text: String = $name.into();
+            let (label, label_details, documentation, insert_text, insert_text_format) = if $snippet
+            {
+                let description = $description.to_string();
+                (
+                    insert_text[..insert_text.find(['(', '[']).unwrap()].to_owned(),
+                    Some(CompletionItemLabelDetails {
+                        detail: None,
+                        description: Some(description.clone()),
+                    }),
+                    Some(Documentation::String(description)),
+                    Some(insert_text),
+                    Some(InsertTextFormat::SNIPPET),
+                )
+            } else {
+                (insert_text, None, None, None, None)
+            };
+            Ok(CompletionItem {
+                label,
+                label_details,
+                documentation,
                 kind: Some($kind),
+                insert_text,
+                insert_text_format,
                 ..Default::default()
+            })
+        }};
+        (@list $str_init:expr, $begin:literal, $end:literal, $iterable:expr) => {{
+            let mut str = $str_init;
+            str += $begin;
+            let mut params = $iterable.iter().enumerate().map(|(i, _)| i + 1);
+            if let Some(i) = params.next() {
+                write!(str, "${}", i)?;
+                // No whitespace on purpose, since otherwise the partial AST
+                // makes ERROR nodes, so completion stops working
+                params.try_for_each(|i| write!(str, ",${}", i))?;
             }
-        };
+            str + $end
+        }};
     }
 
     fn filter_prefixed(
         name: &str,
-        iter: impl Iterator<Item = CompletionItem>,
+        iter: impl Iterator<Item = anyhow::Result<CompletionItem>>,
     ) -> anyhow::Result<Vec<CompletionItem>> {
-        #[derive(PartialEq)]
-        #[repr(transparent)]
-        struct Wrapper(CompletionItem);
-        impl hash::Hash for Wrapper {
-            fn hash<H: hash::Hasher>(&self, state: &mut H) {
-                self.0.label.hash(state);
-            }
-        }
-        impl Eq for Wrapper {}
-        Ok(iter
-            .filter(|completion| name != completion.label && completion.label.starts_with(name))
-            .map(Wrapper)
-            .fold(
-                IndexSet::<_, FxBuildHasher>::with_hasher(FxBuildHasher),
-                |mut acc, x| {
-                    acc.insert(x);
-                    acc
-                },
-            )
-            .into_iter()
-            .map(|Wrapper(x)| x)
-            .collect())
+        iter.filter(|completion| match completion {
+            Ok(completion) => name != completion.label && completion.label.starts_with(name),
+            Err(_) => true,
+        })
+        .collect()
     }
 
     fn index_in_parent(mut node: Node) -> usize {
@@ -70,8 +87,10 @@ pub fn completions(pos: GridIndex, document: &Document) -> anyhow::Result<Comple
                 child.start_position() <= min_pos
                     && !matches!(child.kind(), "close" | "close_list")
                     && (child.start_position() < min_pos
-                        || (!matches!(child.kind(), "comma" | "open_ct" | "open" | "open_list")
-                            && !child.is_error()))
+                        || (!matches!(
+                            child.kind(),
+                            "comma" | "semicolon" | "end" | "open_ct" | "open" | "open_list"
+                        ) && !child.is_error()))
             })
             .last()
         {
@@ -85,11 +104,6 @@ pub fn completions(pos: GridIndex, document: &Document) -> anyhow::Result<Comple
 
     let mut offset = 0;
 
-    warn!(
-        "what - {pos} - {node:?} - {}",
-        node.utf8_text(document.text.text.as_bytes()).unwrap()
-    );
-    warn!("{:#}", node.parent().unwrap());
     let node = if let Some(parent) = node.parent()
         && let Some(grandparent) = parent.parent()
         && grandparent.is_error()
@@ -141,7 +155,6 @@ pub fn completions(pos: GridIndex, document: &Document) -> anyhow::Result<Comple
         match last_arg_list {
             (_, last_arg_list_idx, Some(last_arg_list)) => {
                 indices.drain(last_arg_list_idx..);
-                warn!("{indices:?} - {:#}", last_arg_list);
                 last_arg_list.parent().unwrap()
             }
             (_, _, None) => {
@@ -150,8 +163,15 @@ pub fn completions(pos: GridIndex, document: &Document) -> anyhow::Result<Comple
                     // TODO Also add imports
                     document.functions_and_facts.iter().map(|function| {
                         item!(
-                            (&*function.head.name).to_owned(),
-                            CompletionItemKind::FUNCTION
+                            item!(@list
+                                (&*function.head.name).to_owned(),
+                                "(",
+                                ")",
+                                function.head.parameters
+                            ),
+                            Argument::Function(&function.head),
+                            CompletionItemKind::FUNCTION,
+                            true
                         )
                     }),
                 )?));
@@ -175,7 +195,7 @@ pub fn completions(pos: GridIndex, document: &Document) -> anyhow::Result<Comple
                 .get((indices.next().unwrap() + offset) / 2)?;
             for index in indices {
                 param = match param {
-                    Argument::List(_, args) => args.get(index / 2)?,
+                    Argument::List(args) => args.get(index / 2)?,
                     Argument::Function(node) => node.parameters.get((index + offset) / 2)?,
                     _ => return None,
                 };
@@ -189,23 +209,30 @@ pub fn completions(pos: GridIndex, document: &Document) -> anyhow::Result<Comple
     Ok(CompletionResponse::Array(filter_prefixed(
         name,
         completions.map(|arg| {
+            let (label, snippet) = match arg {
+                Argument::Number(node)
+                | Argument::Atom(node)
+                | Argument::String(node)
+                | Argument::Variable(node) => ((&**node).to_owned(), false),
+                Argument::List(args) => (item!(@list String::new(), "[", "]", args), true),
+                Argument::Function(node) => (
+                    item!(@list (&*node.name).to_owned(), "(", ")", node.parameters),
+                    true,
+                ),
+            };
+
             item!(
-                match arg {
-                    Argument::Number(node) => &**node,
-                    Argument::Atom(node) => &**node,
-                    Argument::String(node) => &**node,
-                    Argument::Variable(node) => &**node,
-                    Argument::List(_, _) => "[",
-                    Argument::Function(node) => &*node.name,
-                },
+                label,
+                arg,
                 match arg {
                     Argument::Number(_) => CompletionItemKind::VALUE,
                     Argument::Atom(_) => CompletionItemKind::CONSTANT,
                     Argument::String(_) => CompletionItemKind::TEXT,
                     Argument::Variable(_) => CompletionItemKind::VARIABLE,
-                    Argument::List(_, _) => CompletionItemKind::SNIPPET,
+                    Argument::List(_) => CompletionItemKind::SNIPPET,
                     Argument::Function(_) => CompletionItemKind::FUNCTION,
-                }
+                },
+                snippet
             )
         }),
     )?))

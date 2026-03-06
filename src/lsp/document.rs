@@ -1,4 +1,7 @@
-use std::ops::Deref;
+use std::{
+    fmt::{self, Write},
+    ops::Deref,
+};
 
 use lsp_types::{Range, Uri};
 use rustc_hash::FxHashMap;
@@ -119,7 +122,7 @@ impl Document {
             "atom" => Atom(MiniNode::new(node, text)?),
             "double_quoted_list_notation" => String(MiniNode::new(node, text)?),
             "variable_term" => Variable(MiniNode::new(node, text)?),
-            "list_notation" => List(MiniNode::pos(node), {
+            "list_notation" => List({
                 let mut cursor = node.walk();
                 node.children(&mut cursor)
                     .skip(1)
@@ -198,13 +201,41 @@ pub struct FunctionOrFact {
     pub inner_variables: SmallVec<[MiniNode; 16]>, // TODO
 }
 #[derive(Debug)]
-pub enum Argument {
+pub enum Argument<Function: Deref<Target = FunctionHeadOrFact> = Box<FunctionHeadOrFact>> {
     Number(MiniNode),
     Atom(MiniNode),
     String(MiniNode),
     Variable(MiniNode),
-    List(Range, Vec<Argument>),
-    Function(Box<FunctionHeadOrFact>),
+    List(Vec<Argument>),
+    Function(Function),
+}
+impl<Function: Deref<Target = FunctionHeadOrFact>> fmt::Display for Argument<Function> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Number(node) | Self::Atom(node) | Self::String(node) | Self::Variable(node) => {
+                f.write_str(node)
+            }
+            Self::List(args) => {
+                f.write_char('[')?;
+                let mut iter = args.iter();
+                if let Some(x) = iter.next() {
+                    x.fmt(f)?;
+                    iter.try_for_each(|x| write!(f, ", {x}"))?;
+                }
+                f.write_char(']')
+            }
+            Self::Function(node) => {
+                f.write_str(&node.name)?;
+                f.write_char('(')?;
+                let mut iter = node.parameters.iter();
+                if let Some(x) = iter.next() {
+                    x.fmt(f)?;
+                    iter.try_for_each(|x| write!(f, ", {x}"))?;
+                }
+                f.write_char(')')
+            }
+        }
+    }
 }
 #[derive(Clone, Debug)]
 pub struct MiniNode {
