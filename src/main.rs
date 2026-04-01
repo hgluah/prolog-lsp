@@ -1,5 +1,9 @@
+#![allow(incomplete_features)]
+#![feature(adt_const_params, generic_const_parameter_types)]
+
 mod init;
 mod lsp;
+mod util;
 
 use init::initialize_result;
 use lsp::main_loop;

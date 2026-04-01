@@ -1,7 +1,6 @@
 use std::sync::LazyLock;
 
 use smallvec::SmallVec;
-use smol_str::SmolStr;
 use tree_sitter::{Node, Query, QueryCursor, StreamingIterator, TextProvider};
 
 use crate::lsp::document::MiniNode;
@@ -193,7 +192,7 @@ pub fn module<'tree>(
             }
             Err(MiniNode::at(
                 module,
-                SmolStr::new_static("Arguments of `module` must be the module name and a list of 'function-name/arity' nodes"),
+                "Arguments of `module` must be the module name and a list of 'function-name/arity' nodes",
             ))
         })
 }

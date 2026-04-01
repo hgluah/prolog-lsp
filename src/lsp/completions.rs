@@ -1,6 +1,5 @@
-use std::{fmt::Write, hash};
+use std::fmt::Write;
 
-use indexmap::IndexSet;
 use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionItemLabelDetails, CompletionResponse,
     Documentation, InsertTextFormat,

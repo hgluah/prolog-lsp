@@ -88,11 +88,14 @@ fn diagnostics_single(_documents: &Documents, doc: &Document) -> impl Iterator<I
             },
         });
 
-    // TODO Unused variable
+    // TODO Unused variable // WARNING, NOT ERROR
+    // TODO two functions with the same name but different arity // WARNING, NOT ERROR
+    // TODO two functions with the same name but different restrictions // WARNING, NOT ERROR // Is it even a warn?
     // TODO Non existent variable
     // TODO Invalid argument
-    // TODO X is <non arith expr>
-    // TODO X = <non num/atom/str/variable expr>
+    // TODO only allow: <variable> `is` <arith expr>
+    // TODO only allow: RHS of `is` cannot have a variable whose value is not yet defined
+    // TODO only allow: <non unary op and non binary op and non function call> `=` <non unary op and non binary op and non function call>
 
     std::iter::chain(
         sintactic,

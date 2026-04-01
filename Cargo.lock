@@ -416,6 +416,7 @@ dependencies = [
  "shellexpand",
  "smallvec",
  "smol_str",
+ "sorted-iter",
  "streaming-iterator",
  "texter",
  "tracing",
@@ -572,6 +573,12 @@ dependencies = [
  "borsh",
  "serde_core",
 ]
+
+[[package]]
+name = "sorted-iter"
+version = "0.1.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bceb57dc07c92cdae60f5b27b3fa92ecaaa42fe36c55e22dbfb0b44893e0b1f7"
 
 [[package]]
 name = "streaming-iterator"
