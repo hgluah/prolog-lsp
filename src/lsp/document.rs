@@ -2,15 +2,18 @@ use std::{
     borrow::Borrow,
     collections::BTreeMap,
     fmt::{self, Write},
-    marker::ConstParamTy,
+    iter::{Enumerate, Map, Peekable},
+    marker::{ConstParamTy, PhantomData},
     ops::Deref,
     rc::Rc,
+    slice::IterMut,
 };
 
+use clap::Arg;
 use either::Either;
 use lsp_types::{Range, Uri};
 use rustc_hash::FxHashMap;
-use smallvec::SmallVec;
+use smallvec::{SmallVec, smallvec};
 use smol_str::ToSmolStr;
 use tracing::info;
 use tree_sitter::{Node, Parser, Point, QueryCursor, StreamingIterator, Tree};
@@ -19,7 +22,10 @@ use texter::{change::GridIndex, core::text::Text};
 
 use crate::{
     lsp::queries::{clauses, module},
-    util::sorted_small_set::{BorrowMap, SortedSmallSet},
+    util::{
+        self_aware_iter::SelfAwareIterator,
+        sorted_small_set::{SSSHandler, SortedSmallSet},
+    },
 };
 
 use super::queries::CLAUSES;
@@ -110,31 +116,79 @@ impl Document {
                                 .unwrap_or_else(|_| todo!() /* TODO */),
                             variables: SortedSmallSet::empty(),
                         };
-                        let mut unprocessed_params = Vec::new();
+                        struct UnprocessedVariablesGroupper;
+                        impl SSSHandler<UnprocessedVariable> for UnprocessedVariablesGroupper {
+                            type Key = str;
+
+                            fn key(x: &UnprocessedVariable) -> &Self::Key {
+                                &x.declaration
+                            }
+
+                            fn reduce(old: &mut UnprocessedVariable, mut new: UnprocessedVariable) {
+                                debug_assert_eq!(old.declaration.text.as_str(), &*new.declaration);
+                                old.domain_all_of.append(&mut new.domain_all_of);
+                                if let Some(new) = new.defined_starting_from_point {
+                                    match &mut old.defined_starting_from_point {
+                                        Some(old) if new < *old => *old = new,
+                                        Some(_) => (),
+                                        old @ None => *old = Some(new),
+                                    }
+                                }
+                            }
+                        }
+                        let mut unprocessed_params = SortedSmallSet::empty();
                         function.head.parameters.iter().for_each(|arg| {
-                            fn variables(res: &mut Vec<UnprocessedVariable>, arg: &Argument) {
+                            fn variables(
+                                res: &mut SortedSmallSet<
+                                    UnprocessedVariable,
+                                    4,
+                                    UnprocessedVariablesGroupper,
+                                >,
+                                arg: &Argument,
+                                nested_path: &mut SmallVec<[SingleFunctionOrArrayCall; 6]>,
+                            ) {
                                 match arg {
                                     Argument::Number(_)
                                     | Argument::Atom(_)
                                     | Argument::String(_) => (),
-                                    Argument::Variable(var) => res.push(var.clone()),
+                                    Argument::Variable(var) => unsafe {
+                                        res.entry(&var).insert(UnprocessedVariable {
+                                            declaration: var.clone(),
+                                            domain_all_of: smallvec![VariableUsage::NestedCall(
+                                                nested_path.clone()
+                                            )],
+                                            defined_starting_from_point: None,
+                                        });
+                                    },
                                     Argument::List(args) => {
-                                        args.iter().for_each(|arg| {
-                                            variables(res, arg);
+                                        args.iter().enumerate().for_each(|(param_idx, arg)| {
+                                            nested_path.push(SingleFunctionOrArrayCall {
+                                                function: None,
+                                                param_idx,
+                                            });
+                                            variables(res, arg, nested_path);
+                                            nested_path.pop();
                                         });
                                     }
                                     Argument::Function(function) => {
-                                        function.parameters.iter().for_each(|arg| {
-                                            variables(res, arg);
-                                        });
+                                        function.parameters.iter().enumerate().for_each(
+                                            |(param_idx, arg)| {
+                                                nested_path.push(SingleFunctionOrArrayCall {
+                                                    function: Some(function.name.clone()),
+                                                    param_idx,
+                                                });
+                                                variables(res, arg, nested_path);
+                                                nested_path.pop();
+                                            },
+                                        );
                                     }
                                 }
                             }
-                            variables(&mut unprocessed_params, arg);
+                            variables(&mut unprocessed_params, arg, &mut SmallVec::new_const())
                         });
 
                         return Some((
-                            function.head.name.to_smolstr(),
+                            function.head.name.text.clone(),
                             (function, unprocessed_params),
                         ));
                     }
@@ -147,28 +201,30 @@ impl Document {
             acc
         });
 
-        while let Some((function, unprocessed_params)) =
+        for (function, unprocessed_params) in
             // TODO Replace with some kind of pop then push it to another global dict after it's finished
-            functions.values_mut().flatten().next()
+            functions.values_mut().flatten()
         {
             for caller_var in unprocessed_params.drain(..) {
                 let domain = caller_var
                     .domain_all_of
                     .into_iter()
                     .map(|usage| match usage {
-                        VariableUsage::ArithIs => VariableDomain::SimpleKind(VariableKind::NUMBER.with(Rc::clone)),
-                        VariableUsage::PatternMatchEq(res) => todo!(),
+                        VariableUsage::ArithIs => VariableDomain::NUMBER.with(Rc::clone),
+                        // VariableUsage::PatternMatchEq(res) => todo!(),
                         VariableUsage::NestedCall(nested) => nested
                             .iter()
                             .position(|first_nested| first_nested.function.is_some()) // If there is no function call (e.g. [X|Tail]), then it's "Any"
                             .map(|first_nested| {
                                 let nested = unsafe { nested.get_unchecked(first_nested..) };
-                                let first_nested = &*unsafe {
+                                let first_nested = &unsafe {
                                     nested
                                         .get_unchecked(0)
                                         .function
+                                        .as_ref()
                                         .unwrap_unchecked()
-                                };
+                                }
+                                .text;
                                 let domain_any_of = std::iter::chain(
                                     // TODO sure, let's add the first one, but we also need to add all the interemediates THAT ARE NOT INCLUDED BEFORE:
                                     //  e.g. example(test(X, Y)) should check other example's, fine, but also the requirements of test THAT ARE NOT INCLUDED IN THE PREVIOUS example'S
@@ -187,82 +243,77 @@ impl Document {
                                     .map(|(callee_param, callee, callees_unprocessed_params)| {
                                         VariableDomain::from_argument(callee_param, |callee_var| {
                                             // At this point, we have a callee_var, so we have to convert it to a caller_var
-                                            let callee_ctx_res = match callee.variables.get(&&**callee_var) {
+                                            let callee_ctx_res = match unsafe { callee.variables.get(&&**callee_var) } {
                                                 Some(var) => var.domain.clone(),
                                                 None => {
-                                                    // TODO This param is still unprocessed...
+                                                    // TODO This var is still unprocessed...
                                                     todo!("something with {callees_unprocessed_params:?}")
                                                 }
                                             };
-                                            'caller_ctx_res: {
-                                                match callee_ctx_res {
-                                                        VariableDomain::SimpleKind(_) => break 'caller_ctx_res callee_ctx_res,
-                                                        VariableDomain::FreeInputVariable => // e.g. example(test(X, Y)) where test(X, X) // TODO Test all of these things (these e.g.'s and such)
-                                                            Either::Left(std::iter::empty()),
-                                                        VariableDomain::NonFreeVariable { any_of } => Either::Right(
-                                                            any_of
-                                                                .iter()
-                                                                .flat_map(|other_param_of_callee|
-                                                                    callee.head.get_path_for(other_param_of_callee)
-                                                                        .filter_map(|path| function.head.get_param_at(path))
-                                                                )
-                                                        ),
-                                                    }
-                                                    .chain(
-                                                        callee.head.get_path_for(callee_var)
-                                                            .filter_map(|path| function.head.get_param_at(path))
-                                                    )
-                                                    .filter_map(|caller_param| match caller_param {
-                                                        Argument::Variable(new_caller_var) => (&**new_caller_var != &*caller_var.declaration).then_some(Either::Left(std::iter::once(Err(new_caller_var.text.clone())))),
-                                                        _ => {
-                                                            let res = VariableDomain::from_argument(caller_param, |new_caller_var| {
-                                                                // At this point, we already have a caller_var, so we don't need to convert it from a callee_var as before
-                                                                if &**new_caller_var == &*caller_var.declaration {
-                                                                    // TODO does this make sense?
-                                                                    VariableDomain::FreeInputVariable
-                                                                } else {
-                                                                    VariableDomain::NonFreeVariable { any_of: SortedSmallSet::single(new_caller_var.text.clone()) }
-                                                                }
-                                                            });
-                                                            Some(match res {
-                                                                VariableDomain::FreeInputVariable =>
-                                                                    // VariableDomain::from_argument can only return this variant if the top level argument
-                                                                    // was a variable, and the resolver returned it, but that return is guarded by the same
-                                                                    // condition that guards the VariableDomain::from_argument call to begin with
-                                                                    unreachable!(),
-                                                                VariableDomain::SimpleKind(res) => Either::Left(std::iter::once(Ok(res))),
-                                                                VariableDomain::NonFreeVariable { any_of } => Either::Right(any_of.iter().cloned().map(Err))
-                                                            })
+                                            let caller_ctx_res = std::iter::chain(
+                                                    callee.head.get_path_for(callee_var)
+                                                        .filter_map(|path| function.head.get_param_at(path)),
+                                                    (&callee_ctx_res.references_variables)
+                                                        .into_iter()
+                                                        .flat_map(|other_param_of_callee|
+                                                            callee.head.get_path_for(other_param_of_callee)
+                                                                .filter_map(|path| function.head.get_param_at(path))
+                                                        )
+                                                )
+                                                .map(|caller_param| VariableDomain::from_argument(caller_param, |new_caller_var| {
+                                                    // At this point, we already have a caller_var, so we don't need to convert it from a callee_var as before
+                                                    if &**new_caller_var == &*caller_var.declaration {
+                                                        // TODO does this make sense?
+                                                        VariableDomain::ANY.with(Rc::clone)
+                                                    } else {
+                                                        let new_caller_var_domain = match unsafe { function.variables.get(&&**new_caller_var) } {
+                                                            Some(var) => var.domain.clone(),
+                                                            None => {
+                                                                // TODO This var is still unprocessed...
+                                                                todo!("something with {callees_unprocessed_params:?}")
+                                                            }
+                                                        };
+                                                        let res = VariableDomain {
+                                                            kind: new_caller_var_domain.kind.clone(),
+                                                            references_variables: unsafe { SortedSmallSet::union_iters(
+                                                                (&new_caller_var_domain.references_variables).into_iter().cloned(),
+                                                                Some(new_caller_var.text.clone())
+                                                            ) },
+                                                        };
+                                                        if res == *new_caller_var_domain {
+                                                            new_caller_var_domain
+                                                        } else {
+                                                            Rc::new(res)
                                                         }
-                                                    })
-                                                    .flatten()
-                                                    .collect::<VariableDomain>().0
-                                            }
+                                                    }
+                                                }))
+                                                .collect::<VariableDomainCollector<{ ReductionKind::Intersection }>>().0;
+                                            VariableDomainCollector::<{ ReductionKind::Intersection }>::reduce(
+                                                caller_ctx_res,
+                                                VariableDomain {
+                                                    kind: callee_ctx_res.kind.clone(),
+                                                    references_variables: SortedSmallSet::empty(),
+                                                },
+                                            )
                                         })
                                     })
-                                    .collect::<VariableDomain>().0
+                                    .collect::<VariableDomainCollector<{ ReductionKind::Union }>>().0
                             })
-                            .unwrap_or(VariableDomain::FreeInputVariable),
+                            .unwrap_or(VariableDomain::ANY.with(Rc::clone))
                     })
-                    .try_fold(None, |acc, x| match (acc, x) {
-                        (None, x) | (x, None) => Ok(x),
-                        (Some(a), Some(b)) => VariableKind::intersection(a, b).map(Some),
-                    });
+                    .collect::<VariableDomainCollector<{ ReductionKind::Intersection }>>().0;
 
-                let domain = match domain {
-                    Ok(Some(domain)) => Some(domain),                 // Valid domain
-                    Ok(None) => None, // "Any" kind, either bc no restrictions or intersection of "Any"s
-                    Err(()) => Some(ExtendedVariableDomain::Invalid), // "Never" / "Invalid" kind
+                unsafe {
+                    function
+                        .variables
+                        .entry(&caller_var.declaration)
+                        .insert(Variable {
+                            declaration: caller_var.declaration,
+                            domain,
+                            defined_starting_from_point: caller_var.defined_starting_from_point,
+                        })
                 };
-
-                // TODO .push shouldn't work
-                function.variables.push(Variable {
-                    declaration: caller_var.declaration,
-                    domain,
-                    defined_starting_from_point: caller_var.defined_starting_from_point,
-                });
             }
-            function.variables.sort_by_key(|var| &*var.declaration);
         }
 
         // self.functions_and_facts.extend(functions);
@@ -355,11 +406,74 @@ pub struct FunctionHeadOrFact {
     pub parameters: SmallVec<[Argument; 8]>,
 }
 impl FunctionHeadOrFact {
-    fn get_path_for(
-        &self,
-        param: &str,
-    ) -> impl Iterator<Item = impl Iterator<Item = SingleFunctionOrArrayCall>> {
-        xxx
+    fn get_path_for<'self_>(
+        &'self_ self,
+        var: &'self_ str,
+    ) -> impl Iterator<Item = impl IntoIterator<Item = SingleFunctionOrArrayCall>> {
+        // TODO Make it return -> impl for<'a> SelfAwareIterator<Item<'a> = impl Iterator<Item = SingleFunctionOrArrayCall>>
+
+        type Path<'a> = Peekable<Enumerate<std::slice::Iter<'a, Argument>>>;
+        struct Iter<'a> {
+            nested_path: SmallVec<[Path<'a>; 16]>,
+            var: &'a str,
+        }
+        impl<'a> Iterator for Iter<'a> {
+            type Item = SmallVec<[SingleFunctionOrArrayCall; 16]>;
+
+            fn next(&mut self) -> Option<Self::Item> {
+                loop {
+                    let path = 'path: loop {
+                        let last = self.nested_path.last_mut()?;
+                        if let Some((_, path)) = last.peek() {
+                            break 'path path;
+                        }
+                        self.nested_path.pop();
+                    };
+                    match path {
+                        Argument::Variable(var) if **var == *self.var => {
+                            return Some(
+                                self.nested_path
+                                    .iter_mut()
+                                    .map(|call| {
+                                        let (param_idx, arg) =
+                                            unsafe { call.peek().unwrap_unchecked() };
+                                        SingleFunctionOrArrayCall {
+                                            function: match arg {
+                                                Argument::List(_) => None,
+                                                Argument::Function(function) => {
+                                                    Some(function.name.clone())
+                                                }
+                                                _ => unsafe { core::hint::unreachable_unchecked() },
+                                            },
+                                            param_idx: *param_idx,
+                                        }
+                                    })
+                                    .collect(),
+                            );
+                        }
+                        Argument::Function(new_args) => {
+                            self.nested_path
+                                .push(new_args.parameters.iter().enumerate().peekable());
+                        }
+                        Argument::List(new_args) => {
+                            self.nested_path
+                                .push(new_args.iter().enumerate().peekable());
+                        }
+                        _ => unsafe {
+                            self.nested_path
+                                .last_mut()
+                                .unwrap_unchecked()
+                                .next()
+                                .unwrap_unchecked();
+                        },
+                    }
+                }
+            }
+        }
+
+        let mut nested_path = SmallVec::new_const();
+        nested_path.push(self.parameters.iter().enumerate().peekable());
+        Iter { nested_path, var }
     }
 
     /// Panics if `nested_call` is empty.\
@@ -371,28 +485,32 @@ impl FunctionHeadOrFact {
         let mut nested_call = nested_call.into_iter();
         let first = nested_call.next().unwrap();
         let first = &self.parameters[first.borrow().param_idx];
-        nested_call.try_fold(first, |parent, child| match parent {
-            Argument::List(args) if child.borrow().function.is_none() => {
-                args.get(child.borrow().param_idx)
-            }
-            Argument::Function(function) => match &child.borrow().function {
-                Some(function_name) if &*function.name == &**function_name => {
-                    function.parameters.get(child.borrow().param_idx)
+        nested_call.try_fold(first, |parent, child| {
+            let child = child.borrow();
+            match parent {
+                Argument::List(args) if child.borrow().function.is_none() => {
+                    args.get(child.borrow().param_idx).map(Into::into)
                 }
+                Argument::Function(function) => match &child.borrow().function {
+                    Some(function_name) if &*function.name == &**function_name => {
+                        function.parameters.get(child.borrow().param_idx)
+                    }
+                    _ => None,
+                },
                 _ => None,
-            },
-            _ => None,
+            }
         })
     }
 }
 #[derive(Debug)]
 pub struct FunctionOrFact {
     pub head: FunctionHeadOrFact,
-    pub variables: SortedSmallSet<[Variable; 16], str, VarToName>,
+    pub variables: SortedSmallSet<Variable, 16, VarToName>,
 }
 struct VarToName;
-impl BorrowMap<Variable, str> for VarToName {
-    fn borrow_map(x: &Variable) -> &str {
+impl SSSHandler<Variable> for VarToName {
+    type Key = str;
+    fn key(x: &Variable) -> &str {
         &x.declaration
     }
 }
@@ -402,7 +520,7 @@ pub enum Argument<Function: Deref<Target = FunctionHeadOrFact> = Box<FunctionHea
     Atom(MiniNode),
     String(MiniNode),
     Variable(MiniNode),
-    List(Vec<Argument>),
+    List(Vec<Argument>), // TODO SmallVec?
     Function(Function),
 }
 impl<Function: Deref<Target = FunctionHeadOrFact>> fmt::Display for Argument<Function> {
@@ -436,309 +554,228 @@ impl<Function: Deref<Target = FunctionHeadOrFact>> fmt::Display for Argument<Fun
 #[derive(Debug)]
 pub struct Variable {
     declaration: MiniNode,
-    domain: VariableDomain, // TODO Check for cycles (e.g. test(X, Y):- X=Y, Y=X.)
-    defined_starting_from_point: Option<Point>, // TODO Use
+    domain: Rc<VariableDomain>, // TODO Check for cycles (e.g. test(X, Y):- X=Y, Y=X.)
+    defined_starting_from_point: Option<Point>, // TODO Compute and Use
 }
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
-pub enum VariableDomain {
-    SimpleKind(Rc<VariableKind>),
-    NonFreeVariable {
-        /// If empty, this is an ill-formed type
-        any_of: SortedSmallSet<[Rc<String>; 2]>,
-    },
-    FreeInputVariable,
+pub struct ComplexKind {
+    /// * If `[]`, then this is not a simple kind (either an array or an ill-formed type, see [`Self::array_kinds`]).
+    /// * If `[...]`, then any of those kinds are valid.
+    pub simple_kinds: SortedSmallSet<VariableKind, 1>,
+
+    /// * If `None`, then this is not an array.
+    /// * If `Some((VariableDomain::~::IllFormed, true))`, then this is the "always empty" valid array kind.
+    /// * If `Some((VariableDomain::~::IllFormed, false))`, then this is is an array of ill-formed types.
+    /// * If `Some((VariableDomain::~::Valid(...), emptyable))`, then this is an array of those kinds, that may (not must) be empty if***f*** `emptyable`.
+    pub array_kind: Option<(Rc<VariableDomain>, bool)>,
 }
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ListVariableDomain {
-    SimpleKind {
-        any_of: SortedSmallSet<[Rc<VariableKind>; 1]>,
-    },
-    NonFreeVariable {
-        /// If empty, this is an ill-formed type
-        any_of: SortedSmallSet<[Rc<String>; 2]>,
-    },
-    FreeInputVariable,
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
+pub struct VariableDomain {
+    /// * If `None`, then "Any" kind is matched by this domain.
+    /// * If `Some(...)`, then that kind is matched by this domain.
+    pub kind: Option<ComplexKind>,
+
+    /// * If `[]`, then it is a free-variable.
+    /// * If `[...]`, then it references all of those variables.
+    pub references_variables: SortedSmallSet<Rc<String>, 2>,
 }
 #[derive(PartialEq, Eq, Clone, Copy, ConstParamTy)]
 pub enum ReductionKind {
     Union,
     Intersection,
 }
-pub struct VariableDomainCollector<const RK: ReductionKind>(VariableDomain);
-impl<const RK: ReductionKind> FromIterator<Result<Rc<VariableKind>, Rc<String>>>
-    for VariableDomainCollector<RK>
-{
-    fn from_iter<T: IntoIterator<Item = Result<Rc<VariableKind>, Rc<String>>>>(iter: T) -> Self {
-        let mut iter = iter.into_iter();
-        let Some(it) = iter.next() else {
-            return Self(match RK {
-                ReductionKind::Union => VariableDomain::FreeInputVariable,
-                ReductionKind::Intersection => VariableDomain::NonFreeVariable {
-                    any_of: SortedSmallSet::empty(),
-                },
-            });
-        };
-        let it = match it {
-            Err(it) => it,
-            Ok(mut it) => loop {
-                // Manual `while let` bc we need to keep the item where the condition is first broken
-                match iter.next() {
-                    None => return Self(VariableDomain::SimpleKind(it)),
-                    Some(Err(it)) => break it, // TODO What about intersection
-                    Some(Ok(new_it)) => match RK {
-                        ReductionKind::Union => match VariableKind::union(it, new_it) {
-                            Ok(x) => it = x,
-                            // TODO rn, some things don't make sense
-                            // * e.g.
-                            //   test(1,1). test(a,a).
-                            //   if example(test(X,Y)). then both X and Y would be FreeVars
-                            // * e.g.
-                            //   test(In,Out,true):-Out=In.
-                            //   test(Out,In,false):-Out=In.
-                            //   if example(X,Y,Cond). then both X and Y would be FreeVars
-                            Err(()) => return Self(VariableDomain::FreeInputVariable),
+pub struct VariableDomainCollector<const RK: ReductionKind>(Rc<VariableDomain>);
+impl<const RK: ReductionKind> VariableDomainCollector<RK> {
+    pub fn reduce(
+        a: impl Borrow<VariableDomain> + Into<Rc<VariableDomain>>,
+        b: impl Borrow<VariableDomain> + Into<Rc<VariableDomain>>,
+    ) -> Rc<VariableDomain> {
+        let res = VariableDomain {
+            kind: match RK {
+                ReductionKind::Union => match (&a.borrow().kind, &b.borrow().kind) {
+                    (Some(a), Some(b)) => Some(ComplexKind {
+                        simple_kinds: unsafe {
+                            SortedSmallSet::union_iters(
+                                (&a.simple_kinds).into_iter().cloned(),
+                                (&b.simple_kinds).into_iter().cloned(),
+                            )
                         },
-                        ReductionKind::Intersection => match VariableKind::intersection(it, new_it)
-                        {
-                            Ok(x) => it = x,
-                            Err(()) => {
-                                return Self(VariableDomain::NonFreeVariable {
-                                    any_of: SortedSmallSet::empty(),
-                                });
+                        array_kind: match (&a.array_kind, &b.array_kind) {
+                            (None, None) => None,
+                            (None, Some((domain, emptyable)))
+                            | (Some((domain, emptyable)), None) => {
+                                Some((domain.clone(), *emptyable))
+                            }
+                            (Some((da, ea)), Some((db, eb))) => {
+                                Some((Self::reduce(da.clone(), db.clone()), *ea || *eb))
                             }
                         },
-                    },
+                    }),
+                    _ => None,
+                },
+                ReductionKind::Intersection => match (&a.borrow().kind, &b.borrow().kind) {
+                    (None, None) => None,
+                    (None, Some(x)) | (Some(x), None) => Some(x.clone()),
+                    (Some(a), Some(b)) => Some(ComplexKind {
+                        simple_kinds: unsafe {
+                            SortedSmallSet::intersection_iters(
+                                (&a.simple_kinds).into_iter().cloned(),
+                                (&b.simple_kinds).into_iter().cloned(),
+                            )
+                        },
+                        array_kind: match (&a.array_kind, &b.array_kind) {
+                            (Some((da, ea)), Some((db, eb))) => {
+                                Some((Self::reduce(da.clone(), db.clone()), *ea && *eb))
+                            }
+                            _ => None,
+                        },
+                    }),
+                },
+            },
+            references_variables: {
+                let a = (&a.borrow().references_variables).into_iter().cloned();
+                let b = (&b.borrow().references_variables).into_iter().cloned();
+                match RK {
+                    ReductionKind::Union => unsafe { SortedSmallSet::intersection_iters(a, b) },
+                    ReductionKind::Intersection => unsafe { SortedSmallSet::union_iters(a, b) },
                 }
             },
         };
-        Self(VariableDomain::NonFreeVariable {
-            any_of: std::iter::chain(Some(it), iter.filter_map(Result::err)).collect(),
-        })
+        if res == *a.borrow() {
+            a.into()
+        } else if res == *b.borrow() {
+            b.into()
+        } else {
+            VariableDomain::try_static(res)
+        }
     }
 }
-impl<const RK: ReductionKind> FromIterator<VariableDomain> for VariableDomainCollector<RK> {
-    fn from_iter<T: IntoIterator<Item = VariableDomain>>(iter: T) -> Self {
-        // Hack while `Try` is not stable
-        let mut iter = iter.into_iter();
-        let Some(first) = iter.next() else {
-            return Self(VariableDomain::FreeInputVariable);
-        };
-        // TODO Same "e.g."s as in the other FromIterator
-        Self(
-            iter.try_fold(first, |a, b| match (a, b) {
-                (VariableDomain::FreeInputVariable, _) | (_, VariableDomain::FreeInputVariable) => {
-                    Err(())
-                }
-                (
-                    VariableDomain::NonFreeVariable { any_of: a },
-                    VariableDomain::NonFreeVariable { any_of: b },
-                ) => Ok(VariableDomain::NonFreeVariable {
-                    any_of: SortedSmallSet::union(a, b),
-                }),
-                (x @ VariableDomain::NonFreeVariable { .. }, VariableDomain::SimpleKind(_))
-                | (VariableDomain::SimpleKind(_), x @ VariableDomain::NonFreeVariable { .. }) => {
-                    Ok(x)
-                }
-                (VariableDomain::SimpleKind(a), VariableDomain::SimpleKind(b)) => {
-                    VariableKind::union(a, b).map(VariableDomain::SimpleKind)
-                }
-            })
-            .unwrap_or(VariableDomain::FreeInputVariable),
-        )
+impl<const RK: ReductionKind> FromIterator<Rc<VariableDomain>> for VariableDomainCollector<RK> {
+    fn from_iter<T: IntoIterator<Item = Rc<VariableDomain>>>(iter: T) -> Self {
+        // TODO rn, some things don't make sense
+        // * e.g.
+        //   test(1,1). test(a,a).
+        //   if example(test(X,Y)). then both X and Y would be FreeVars
+        // * e.g.
+        //   test(In,Out,true):-Out=In.
+        //   test(Out,In,false):-Out=In.
+        //   if example(X,Y,Cond). then both X and Y would be FreeVars
+        Self(iter.into_iter().reduce(Self::reduce).unwrap_or_else(|| {
+            match RK {
+                // TODO Is this fine, or should it be swapped. check users
+                ReductionKind::Union => &VariableDomain::INVALID,
+                ReductionKind::Intersection => &VariableDomain::ANY,
+            }
+            .with(Rc::clone)
+        }))
     }
 }
 impl VariableDomain {
+    thread_local! {
+        static ANY: Rc<VariableDomain> = Rc::new(const {
+            VariableDomain {
+                kind: None,
+                references_variables: SortedSmallSet::empty(),
+            }
+        });
+        static INVALID: Rc<VariableDomain> = Rc::new(const {
+            VariableDomain {
+                kind: Some(ComplexKind {
+                    simple_kinds: SortedSmallSet::empty(),
+                    array_kind: None,
+                }),
+                references_variables: SortedSmallSet::empty(),
+            }
+        });
+        static NUMBER: Rc<VariableDomain> = Rc::new(VariableDomain {
+            kind: Some(ComplexKind { simple_kinds: SortedSmallSet::single(VariableKind::Number), array_kind: None }),
+            references_variables: SortedSmallSet::empty(),
+        });
+        static LIST_ANY_EMPTYABLE: Rc<VariableDomain> = Rc::new(VariableDomain {
+            kind: Some(ComplexKind { simple_kinds: SortedSmallSet::empty(), array_kind: Some((VariableDomain::ANY.with(Rc::clone), true)) }),
+            references_variables: SortedSmallSet::empty(),
+        });
+        static LIST_ANY_NON_EMPTY: Rc<VariableDomain> = Rc::new(VariableDomain {
+            kind: Some(ComplexKind { simple_kinds: SortedSmallSet::empty(), array_kind: Some((VariableDomain::ANY.with(Rc::clone), false)) }),
+            references_variables: SortedSmallSet::empty(),
+        });
+        static LIST_ALWAYS_EMPTY: Rc<VariableDomain> = Rc::new(VariableDomain {
+            kind: Some(ComplexKind { simple_kinds: SortedSmallSet::empty(), array_kind: Some((VariableDomain::INVALID.with(Rc::clone), true)) }),
+            references_variables: SortedSmallSet::empty(),
+        });
+        static LIST_INVALID: Rc<VariableDomain> = Rc::new(VariableDomain {
+            kind: Some(ComplexKind { simple_kinds: SortedSmallSet::empty(), array_kind: Some((VariableDomain::INVALID.with(Rc::clone), false)) }),
+            references_variables: SortedSmallSet::empty(),
+        });
+    }
+
+    fn try_static(
+        item: impl Into<Rc<VariableDomain>> + Borrow<VariableDomain>,
+    ) -> Rc<VariableDomain> {
+        [
+            &VariableDomain::ANY,
+            &VariableDomain::INVALID,
+            &VariableDomain::NUMBER,
+            &VariableDomain::LIST_ANY_EMPTYABLE,
+            &VariableDomain::LIST_ANY_NON_EMPTY,
+            &VariableDomain::LIST_ALWAYS_EMPTY,
+            &VariableDomain::LIST_INVALID,
+        ]
+        .into_iter()
+        .find_map(|x| x.with(|x| (item.borrow() == &**x).then(|| x.clone())))
+        .unwrap_or_else(|| item.into())
+    }
+
+    pub fn is_ill_formed(&self) -> bool {
+        matches!(&self.kind, Some(ComplexKind{ simple_kinds: x, array_kind: None }) if x.is_empty())
+    }
+
     fn from_argument(
         arg: &Argument,
-        mut parameter_resolver: impl FnMut(&MiniNode) -> VariableDomain,
-    ) -> Self {
-        let kind = match arg {
-            Argument::Number(_) => VariableKind::NUMBER.with(Rc::clone),
-            Argument::Atom(atom) => Rc::new(VariableKind::Atom {
-                any_of: SortedSmallSet::single(atom.text.clone()),
-            }),
-            Argument::String(str) => Rc::new(VariableKind::String {
-                any_of: SortedSmallSet::single(str.text.clone()),
-            }),
-            Argument::Function(function) => Rc::new(VariableKind::Function {
-                any_of: SortedSmallSet::single(function.name.text.clone()),
-            }),
-            Argument::List(args) => {
-                let any_of = args
-                    .iter()
-                    .map(|x| Self::from_argument(x, &mut parameter_resolver))
-                    .collect::<SortedSmallSet<_>>();
-                if any_of.is_empty() {
-                    VariableKind::LIST_ALWAYS_EMPTY.with(Rc::clone)
-                } else {
-                    Rc::new(VariableKind::List {
-                        any_of,
-                        emptyable: false,
-                    })
-                }
-            }
-            Argument::Variable(var) => return parameter_resolver(var),
-        };
-        Self::SimpleKind(kind)
+        mut parameter_resolver: impl FnMut(&MiniNode) -> Rc<Self>,
+    ) -> Rc<Self> {
+        if let Argument::Variable(var) = arg {
+            Self::try_static(parameter_resolver(var))
+        } else {
+            let res = Self {
+                kind: Some(ComplexKind {
+                    simple_kinds: match arg {
+                        Argument::Number(_) => Some(VariableKind::Number),
+                        Argument::Atom(atom) => Some(VariableKind::Atom(atom.text.clone())),
+                        Argument::String(str) => Some(VariableKind::String(str.text.clone())),
+                        Argument::Function(function) => {
+                            Some(VariableKind::Function(function.name.text.clone()))
+                        }
+                        _ => None,
+                    }
+                    .map(SortedSmallSet::single)
+                    .unwrap_or(SortedSmallSet::empty()),
+                    array_kind: match arg {
+                        Argument::List(args) => Some((
+                            args.into_iter()
+                                .map(|x| Self::from_argument(x, &mut parameter_resolver))
+                                .collect::<VariableDomainCollector<{ ReductionKind::Union }>>()
+                                .0,
+                            args.is_empty(),
+                        )),
+                        _ => None,
+                    },
+                }),
+                references_variables: match arg {
+                    Argument::Variable(var) => SortedSmallSet::single(var.text.clone()),
+                    _ => SortedSmallSet::empty(),
+                },
+            };
+            Self::try_static(res)
+        }
     }
 }
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub enum VariableKind {
     Number,
-    Atom {
-        any_of: SortedSmallSet<[Rc<String>; 8]>,
-    },
-    String {
-        any_of: SortedSmallSet<[Rc<String>; 8]>,
-    },
-    /// ([], false) for an invalid list
-    /// ([], true) for a list that can only be empty
-    /// ([domain, ...], false) for a non-empty list
-    /// ([domain, ...], true) for a list that may or may not be empty
-    List {
-        element_domain: ListVariableDomain,
-        emptyable: bool,
-    },
-    Function {
-        any_of: SortedSmallSet<[Rc<String>; 8]>,
-    },
-}
-impl VariableKind {
-    thread_local! {
-        static NUMBER: Rc<VariableKind> = Rc::new(VariableKind::Number);
-        static LIST_INVALID: Rc<VariableKind> = Rc::new(VariableKind::List { any_of: SortedSmallSet::empty(), emptyable: false });
-        static LIST_ALWAYS_EMPTY: Rc<VariableKind> = Rc::new(VariableKind::List { any_of: SortedSmallSet::empty(), emptyable: true });
-    }
-
-    fn union(a: Rc<Self>, b: Rc<Self>) -> Result<Rc<Self>, ()> {
-        Ok(match (&*a, &*b) {
-            (Self::Number, Self::Number) => a,
-            (Self::Atom { any_of: a }, Self::Atom { any_of: b }) => Rc::new(Self::Atom {
-                any_of: unsafe {
-                    SortedSmallSet::union_iters(a.into_iter().cloned(), b.into_iter().cloned())
-                },
-            }),
-            (Self::String { any_of: a }, Self::String { any_of: b }) => Rc::new(Self::String {
-                any_of: unsafe {
-                    SortedSmallSet::union_iters(a.into_iter().cloned(), b.into_iter().cloned())
-                },
-            }),
-            (Self::Function { any_of: a }, Self::Function { any_of: b }) => {
-                Rc::new(Self::Function {
-                    any_of: unsafe {
-                        SortedSmallSet::union_iters(a.into_iter().cloned(), b.into_iter().cloned())
-                    },
-                })
-            }
-            (
-                Self::List {
-                    any_of: domain_a,
-                    emptyable: a_maybe_empty,
-                },
-                Self::List {
-                    any_of: domain_b,
-                    emptyable: b_maybe_empty,
-                },
-            ) => {
-                match (
-                    *a_maybe_empty,
-                    *b_maybe_empty,
-                    domain_b.is_empty(),
-                    domain_a.is_empty(),
-                ) {
-                    (_a_maybe_empty @ false, _, _a_always_empty @ true, _) => {
-                        // TODO Should `Invalid U X` really be = to `X`?
-                        b
-                    }
-                    (_, _b_maybe_empty @ false, _, _b_always_empty @ true) => {
-                        // TODO Should `Invalid U X` really be = to `X`?
-                        a
-                    }
-                    (_a_maybe_empty @ true, _, _, _b_always_empty @ true) => a,
-                    (_a_maybe_empty @ false, _, _, _b_always_empty @ true) => Rc::new(Self::List {
-                        any_of: domain_a.clone(),
-                        emptyable: true,
-                    }),
-                    (_, _b_maybe_empty @ true, _a_always_empty @ true, _) => b,
-                    (_, _b_maybe_empty @ false, _a_always_empty @ true, _) => Rc::new(Self::List {
-                        any_of: domain_b.clone(),
-                        emptyable: true,
-                    }),
-                    (
-                        a_maybe_empty,
-                        b_maybe_empty,
-                        _a_always_empty @ false,
-                        _b_always_empty @ false,
-                    ) => Rc::new(Self::List {
-                        any_of: unsafe {
-                            SortedSmallSet::union_iters(
-                                domain_a.into_iter().cloned(),
-                                domain_b.into_iter().cloned(),
-                            )
-                        },
-                        emptyable: a_maybe_empty || b_maybe_empty,
-                    }),
-                }
-            }
-            _ => return Err(()),
-        })
-    }
-
-    fn intersection(a: Rc<Self>, b: Rc<Self>) -> Result<Rc<Self>, ()> {
-        Ok(match (&*a, &*b) {
-            (Self::Number, Self::Number) => a,
-            (Self::Atom { any_of: a }, Self::Atom { any_of: b }) => Rc::new(Self::Atom {
-                any_of: unsafe {
-                    SortedSmallSet::intersection_iters(
-                        a.into_iter().cloned(),
-                        b.into_iter().cloned(),
-                    )
-                },
-            }),
-            (Self::String { any_of: a }, Self::String { any_of: b }) => Rc::new(Self::String {
-                any_of: unsafe {
-                    SortedSmallSet::intersection_iters(
-                        a.into_iter().cloned(),
-                        b.into_iter().cloned(),
-                    )
-                },
-            }),
-            (Self::Function { any_of: a }, Self::Function { any_of: b }) => {
-                Rc::new(Self::Function {
-                    any_of: unsafe {
-                        SortedSmallSet::intersection_iters(
-                            a.into_iter().cloned(),
-                            b.into_iter().cloned(),
-                        )
-                    },
-                })
-            }
-            (
-                Self::List {
-                    any_of: domain_a,
-                    emptyable: a_maybe_empty,
-                },
-                Self::List {
-                    any_of: domain_b,
-                    emptyable: b_maybe_empty,
-                },
-            ) => {
-                let emptyable = *a_maybe_empty && *b_maybe_empty;
-                let any_of = unsafe {
-                    SortedSmallSet::intersection_iters(
-                        domain_a.into_iter().cloned(),
-                        domain_b.into_iter().cloned(),
-                    )
-                };
-                match (any_of.is_empty(), emptyable) {
-                    (true, true) => Self::LIST_ALWAYS_EMPTY.with(Rc::clone),
-                    (true, false) => Self::LIST_INVALID.with(Rc::clone),
-                    (_, _) => Rc::new(Self::List { any_of, emptyable }),
-                }
-            }
-            _ => return Err(()),
-        })
-    }
+    Atom(Rc<String>),
+    String(Rc<String>),
+    Function(Rc<String>),
 }
 #[derive(Debug)]
 struct UnprocessedVariable {
@@ -749,15 +786,15 @@ struct UnprocessedVariable {
 #[derive(Debug)]
 enum VariableUsage {
     NestedCall(
-        /// Non empty
-        SmallVec<[SingleFunctionOrArrayCall; 8]>,
+        /// Non empty // TODO Is it tho
+        SmallVec<[SingleFunctionOrArrayCall; 6]>,
     ),
 
     // TODO Document that at these Eq and Is MUST **NOT** be any kind of Eq/Is, just those that act as operators, e.g. [X|Tail] = [123], but not when they act as structs, e.g. hello_world(X = 123)
-    PatternMatchEq(XXX),
-    ArithIs,
+    // PatternMatchEq(XXX), // TODO Construct
+    ArithIs, // TODO Construct
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct SingleFunctionOrArrayCall {
     function: Option<MiniNode>, // TODO We should add the possibility of "function" being "=" or "is". They WOULD **NOT** imply anoything other than the output_type=input_type and output_type=num respectively, since at this point they don't act as actual operators, just as structs with fancy names
     param_idx: usize,

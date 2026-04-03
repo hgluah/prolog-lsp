@@ -1,5 +1,6 @@
 #![allow(incomplete_features)]
 #![feature(adt_const_params, generic_const_parameter_types)]
+#![feature(maybe_uninit_uninit_array_transpose)]
 
 mod init;
 mod lsp;
