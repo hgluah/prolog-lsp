@@ -33,6 +33,7 @@ pub fn references(
     let _ = name;
     let _ = include_declaration;
     let completions = Vec::new();
+    // TODO
 
     Ok(Some(completions))
 }

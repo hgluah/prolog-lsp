@@ -182,7 +182,7 @@ impl_sorted_small_set!(FromIterator<T> {
         res.sort_unstable_by(|a, b| Ord::cmp(Handler::key(a), Handler::key(b)));
 
         if let Some(prev_last_idx) = res.len().checked_sub(2) {
-            for idx in 0..=prev_last_idx {
+            for idx in (0..=prev_last_idx).rev() {
                 if Handler::key(unsafe { res.get_unchecked(idx) })
                     == Handler::key(unsafe { res.get_unchecked(idx.unchecked_add(1)) }) {
                     let last = unsafe { res.pop().unwrap_unchecked() };

@@ -163,7 +163,7 @@ pub fn completions(pos: GridIndex, document: &Document) -> anyhow::Result<Comple
                     (&document.functions_and_facts).into_iter().map(|function| {
                         item!(
                             item!(@list
-                                (&*function.head.name).to_owned(),
+                                (&**function.head.name).to_owned(),
                                 "(",
                                 ")",
                                 function.head.parameters
@@ -188,15 +188,15 @@ pub fn completions(pos: GridIndex, document: &Document) -> anyhow::Result<Comple
     let completions = (&document.functions_and_facts)
         .into_iter()
         .filter_map(|function| {
-            if &*function.head.name == function_name {
+            if &**function.head.name == function_name {
                 let mut indices = indices.iter().copied().rev();
-                let mut param = function
+                let mut param = &**function
                     .head
                     .parameters
                     .get((indices.next().unwrap() + offset) / 2)?;
                 for index in indices {
                     param = match param {
-                        Argument::List(args) => args.get(index / 2)?,
+                        Argument::List(args, _) => args.get(index / 2)?,
                         Argument::Function(node) => node.parameters.get((index + offset) / 2)?,
                         _ => return None,
                     };
@@ -215,9 +215,9 @@ pub fn completions(pos: GridIndex, document: &Document) -> anyhow::Result<Comple
                 | Argument::Atom(node)
                 | Argument::String(node)
                 | Argument::Variable(node) => ((&**node).to_owned(), false),
-                Argument::List(args) => (item!(@list String::new(), "[", "]", args), true),
+                Argument::List(args, _) => (item!(@list String::new(), "[", "]", args), true),
                 Argument::Function(node) => (
-                    item!(@list (&*node.name).to_owned(), "(", ")", node.parameters),
+                    item!(@list (&**node.name).to_owned(), "(", ")", node.parameters),
                     true,
                 ),
             };
@@ -230,7 +230,7 @@ pub fn completions(pos: GridIndex, document: &Document) -> anyhow::Result<Comple
                     Argument::Atom(_) => CompletionItemKind::CONSTANT,
                     Argument::String(_) => CompletionItemKind::TEXT,
                     Argument::Variable(_) => CompletionItemKind::VARIABLE,
-                    Argument::List(_) => CompletionItemKind::SNIPPET,
+                    Argument::List(_, _) => CompletionItemKind::SNIPPET,
                     Argument::Function(_) => CompletionItemKind::FUNCTION,
                 },
                 snippet

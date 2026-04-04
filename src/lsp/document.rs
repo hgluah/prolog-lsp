@@ -109,6 +109,7 @@ impl Document {
                         let function = FunctionOrFact {
                             head: Self::parse_funtion_head(function, &self.text.text)
                                 .unwrap_or_else(|_| todo!() /* TODO */),
+                            position_including_body: MiniNode::pos(node).into(),
                             variables: SortedSmallSet::empty(),
                         };
                         sss_handler!(
@@ -151,7 +152,7 @@ impl Document {
                                             defined_starting_from_point: None,
                                         });
                                     },
-                                    Argument::List(args) => {
+                                    Argument::List(args, _) => {
                                         args.iter().enumerate().for_each(|(param_idx, arg)| {
                                             nested_path.push(SingleFunctionOrArrayCall {
                                                 function: None,
@@ -165,7 +166,7 @@ impl Document {
                                         function.parameters.iter().enumerate().for_each(
                                             |(param_idx, arg)| {
                                                 nested_path.push(SingleFunctionOrArrayCall {
-                                                    function: Some(function.name.clone()),
+                                                    function: Some(function.name.clone().into()),
                                                     param_idx,
                                                 });
                                                 variables(res, arg, nested_path);
@@ -255,12 +256,12 @@ impl Document {
                                             };
                                             let caller_ctx_res = std::iter::chain(
                                                     callee.head.get_path_for(callee_var)
-                                                        .filter_map(|path| function.head.get_param_at(path)),
+                                                        .filter_map(|(_, path)| function.head.get_param_at(path)),
                                                     (&callee_ctx_res.references_variables)
                                                         .into_iter()
                                                         .flat_map(|other_param_of_callee|
                                                             callee.head.get_path_for(other_param_of_callee)
-                                                                .filter_map(|path| function.head.get_param_at(path))
+                                                                .filter_map(|(_, path)| function.head.get_param_at(path))
                                                         )
                                                 )
                                                 .map(|caller_param| VariableDomain::from_argument(caller_param, |new_caller_var| {
@@ -308,7 +309,7 @@ impl Document {
 
                 unsafe {
                     function.variables.push(Variable {
-                        declaration: caller_var.declaration,
+                        declaration: caller_var.declaration.text,
                         domain,
                         defined_starting_from_point: caller_var.defined_starting_from_point,
                     })
@@ -330,14 +331,17 @@ impl Document {
             "atom" => Atom(MiniNode::new(node, text)?),
             "double_quoted_list_notation" => String(MiniNode::new(node, text)?),
             "variable_term" => Variable(MiniNode::new(node, text)?),
-            "list_notation" => List({
-                let mut cursor = node.walk();
-                node.children(&mut cursor)
-                    .skip(1)
-                    .step_by(2)
-                    .map(|child| Self::parse_arg(child, text.as_ref()))
-                    .collect::<Result<_, _>>()?
-            }),
+            "list_notation" => List(
+                {
+                    let mut cursor = node.walk();
+                    node.children(&mut cursor)
+                        .skip(1)
+                        .step_by(2)
+                        .map(|child| Self::parse_arg(child, text.as_ref()).map(Into::into))
+                        .collect::<Result<_, _>>()?
+                },
+                MiniNode::pos(node),
+            ),
             "functional_notation" => Function(Box::new(Self::parse_funtion_head(node, text)?)),
             _ => return Err(todo!()), // TODO
         })
@@ -374,11 +378,13 @@ impl Document {
 
         Ok(FunctionHeadOrFact {
             name: MiniNode::new(function_name, text.as_ref())
-                .unwrap_or_else(|_| todo!() /* TODO */),
+                .unwrap_or_else(|_| todo!() /* TODO */)
+                .into(),
+            position_including_params: MiniNode::pos(function).into(),
             parameters: {
                 let mut res = SmallVec::new();
                 for arg in args.children(&mut cursor).step_by(2) {
-                    res.push(Self::parse_arg(arg, text.as_ref())?);
+                    res.push(Self::parse_arg(arg, text.as_ref())?.into());
                 }
                 res
             },
@@ -401,70 +407,77 @@ pub struct Exports {
 }
 #[derive(Debug)]
 pub struct FunctionHeadOrFact {
-    pub name: MiniNode,
-    pub parameters: SmallVec<[Argument; 8]>,
+    pub name: NoAlternate<MiniNode>,
+    pub position_including_params: NoAlternate<Range>,
+    pub parameters: SmallVec<[NoAlternate<Argument>; 8]>,
 }
 impl FunctionHeadOrFact {
-    fn get_path_for<'self_>(
+    pub fn get_path_for<'self_>(
         &'self_ self,
         var: &'self_ str,
-    ) -> impl Iterator<Item = impl IntoIterator<Item = SingleFunctionOrArrayCall>> {
+    ) -> impl Iterator<Item = (Range, impl IntoIterator<Item = SingleFunctionOrArrayCall>)> {
         // TODO Make it return -> impl for<'a> SelfAwareIterator<Item<'a> = impl Iterator<Item = SingleFunctionOrArrayCall>>
 
-        type Path<'a> = Peekable<Enumerate<std::slice::Iter<'a, Argument>>>;
+        type Path<'a> = Peekable<Enumerate<std::slice::Iter<'a, NoAlternate<Argument>>>>;
         struct Iter<'a> {
             nested_path: SmallVec<[Path<'a>; 16]>,
             var: &'a str,
         }
         impl<'a> Iterator for Iter<'a> {
-            type Item = SmallVec<[SingleFunctionOrArrayCall; 16]>;
+            type Item = (Range, SmallVec<[SingleFunctionOrArrayCall; 16]>);
 
             fn next(&mut self) -> Option<Self::Item> {
                 loop {
                     let path = 'path: loop {
-                        let last = self.nested_path.last_mut()?;
-                        if let Some((_, path)) = last.peek() {
+                        if let Some((_, path)) = self.nested_path.last_mut()?.peek() {
                             break 'path path;
                         }
                         self.nested_path.pop();
+                        self.nested_path.last_mut()?.next(); // Skip the array/function that pushed the new scope
                     };
-                    match path {
-                        Argument::Variable(var) if **var == *self.var => {
-                            return Some(
-                                self.nested_path
-                                    .iter_mut()
-                                    .map(|call| {
-                                        let (param_idx, arg) =
-                                            unsafe { call.peek().unwrap_unchecked() };
-                                        SingleFunctionOrArrayCall {
-                                            function: match arg {
-                                                Argument::List(_) => None,
-                                                Argument::Function(function) => {
-                                                    Some(function.name.clone())
-                                                }
-                                                _ => unsafe { core::hint::unreachable_unchecked() },
-                                            },
-                                            param_idx: *param_idx,
-                                        }
-                                    })
-                                    .collect(),
-                            );
-                        }
+                    let (_, path) = match &***path {
                         Argument::Function(new_args) => {
                             self.nested_path
                                 .push(new_args.parameters.iter().enumerate().peekable());
+                            continue;
                         }
-                        Argument::List(new_args) => {
+                        Argument::List(new_args, _) => {
                             self.nested_path
                                 .push(new_args.iter().enumerate().peekable());
+                            continue;
                         }
                         _ => unsafe {
                             self.nested_path
                                 .last_mut()
                                 .unwrap_unchecked()
                                 .next()
-                                .unwrap_unchecked();
+                                .unwrap_unchecked()
                         },
+                    };
+                    if let Argument::Variable(var) = &**path
+                        && **var == *self.var
+                    {
+                        let len = self.nested_path.len();
+                        return Some((
+                            var.position,
+                            (&mut self.nested_path[..len - 1])
+                                .iter_mut()
+                                .map(|call| {
+                                    let (param_idx, arg) =
+                                        unsafe { call.peek().unwrap_unchecked() };
+                                    SingleFunctionOrArrayCall {
+                                        function: match &***arg {
+                                            Argument::List(_, _) => None,
+                                            Argument::Function(function) => {
+                                                Some(function.name.clone().into())
+                                            }
+                                            _ => unsafe { core::hint::unreachable_unchecked() },
+                                        },
+                                        param_idx: *param_idx,
+                                    }
+                                })
+                                .collect(),
+                        ));
                     }
                 }
             }
@@ -483,17 +496,18 @@ impl FunctionHeadOrFact {
     ) -> Option<&Argument> {
         let mut nested_call = nested_call.into_iter();
         let first = nested_call.next().unwrap();
-        let first = &self.parameters[first.borrow().param_idx];
+        let first = &*self.parameters[first.borrow().param_idx];
         nested_call.try_fold(first, |parent, child| {
             let child = child.borrow();
             match parent {
-                Argument::List(args) if child.borrow().function.is_none() => {
-                    args.get(child.borrow().param_idx).map(Into::into)
+                Argument::List(args, _) if child.borrow().function.is_none() => {
+                    args.get(child.borrow().param_idx).map(Deref::deref)
                 }
                 Argument::Function(function) => match &child.borrow().function {
-                    Some(function_name) if &*function.name == &**function_name => {
-                        function.parameters.get(child.borrow().param_idx)
-                    }
+                    Some(function_name) if &**function.name == &**function_name => function
+                        .parameters
+                        .get(child.borrow().param_idx)
+                        .map(Deref::deref),
                     _ => None,
                 },
                 _ => None,
@@ -504,16 +518,17 @@ impl FunctionHeadOrFact {
 #[derive(Debug)]
 pub struct FunctionOrFact {
     pub head: FunctionHeadOrFact,
+    pub position_including_body: NoAlternate<Range>,
     pub variables: SortedSmallSet<Variable, 16, VarToName>,
 }
-sss_handler!(<()> VarToName<Variable> Key = str; |x| &x.declaration);
+sss_handler!(<()> pub VarToName<Variable> Key = str; |x| &x.declaration);
 #[derive(Debug)]
 pub enum Argument<Function: Deref<Target = FunctionHeadOrFact> = Box<FunctionHeadOrFact>> {
     Number(MiniNode),
     Atom(MiniNode),
     String(MiniNode),
     Variable(MiniNode),
-    List(Vec<Argument>), // TODO SmallVec?
+    List(Vec<NoAlternate<Argument>>, Range), // TODO SmallVec?
     Function(Function),
 }
 impl<Function: Deref<Target = FunctionHeadOrFact>> fmt::Display for Argument<Function> {
@@ -522,7 +537,7 @@ impl<Function: Deref<Target = FunctionHeadOrFact>> fmt::Display for Argument<Fun
             Self::Number(node) | Self::Atom(node) | Self::String(node) | Self::Variable(node) => {
                 f.write_str(node)
             }
-            Self::List(args) => {
+            Self::List(args, _) => {
                 f.write_char('[')?;
                 let mut iter = args.iter();
                 if let Some(x) = iter.next() {
@@ -546,9 +561,9 @@ impl<Function: Deref<Target = FunctionHeadOrFact>> fmt::Display for Argument<Fun
 }
 #[derive(Debug)]
 pub struct Variable {
-    declaration: MiniNode,
-    domain: Rc<VariableDomain>, // TODO Check for cycles (e.g. test(X, Y):- X=Y, Y=X.)
-    defined_starting_from_point: Option<Point>, // TODO Compute and Use
+    pub declaration: Rc<String>,
+    pub domain: Rc<VariableDomain>, // TODO Check for cycles (e.g. test(X, Y):- X=Y, Y=X.)
+    pub defined_starting_from_point: Option<Point>, // TODO Compute and Use
 }
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub struct ComplexKind {
@@ -722,6 +737,19 @@ impl VariableDomain {
     pub fn is_ill_formed(&self) -> bool {
         matches!(&self.kind, Some(ComplexKind{ simple_kinds: x, array_kind: None }) if x.is_empty())
     }
+    pub fn is_not_complex_type(&self) -> bool {
+        match &self.kind {
+            Some(ComplexKind {
+                simple_kinds,
+                array_kind: None,
+            }) => simple_kinds.len() <= 1,
+            Some(ComplexKind {
+                simple_kinds,
+                array_kind: Some(_),
+            }) => simple_kinds.is_empty(),
+            _ => true,
+        }
+    }
 
     fn from_argument(
         arg: &Argument,
@@ -748,7 +776,7 @@ impl VariableDomain {
                         .map(SortedSmallSet::single)
                         .unwrap_or(SortedSmallSet::empty()),
                         array_kind: match arg {
-                            Argument::List(args) => Some((
+                            Argument::List(args, _) => Some((
                                 args.into_iter()
                                     .map(|x| inner(x, parameter_resolver))
                                     .collect::<VariableDomainCollector<{ ReductionKind::Union }>>()
@@ -794,7 +822,7 @@ enum VariableUsage {
     ArithIs, // TODO Construct
 }
 #[derive(Debug, Clone)]
-struct SingleFunctionOrArrayCall {
+pub struct SingleFunctionOrArrayCall {
     function: Option<MiniNode>, // TODO We should add the possibility of "function" being "=" or "is". They WOULD **NOT** imply anoything other than the output_type=input_type and output_type=num respectively, since at this point they don't act as actual operators, just as structs with fancy names
     param_idx: usize,
 }

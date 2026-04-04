@@ -1,17 +1,16 @@
 use std::{
+    borrow::{Borrow, BorrowMut},
     fmt::FormattingOptions,
     ops::{Deref, DerefMut},
 };
 
-pub struct NoAlternate<T>(T);
+#[repr(transparent)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
+pub struct NoAlternate<T>(pub T);
 
 macro_rules! formatter {
     ($ty:ident |$opts:pat_param| $expr:expr) => {
         impl<T> $ty<T> {
-            #[inline]
-            pub fn into_inner(self) -> T {
-                self.0
-            }
             #[inline]
             pub fn into(self) -> T {
                 self.0
@@ -34,6 +33,30 @@ macro_rules! formatter {
             #[inline]
             fn deref_mut(&mut self) -> &mut T {
                 &mut self.0
+            }
+        }
+        impl<T> Borrow<T> for $ty<T> {
+            #[inline]
+            fn borrow(&self) -> &T {
+                &self
+            }
+        }
+        impl<T> BorrowMut<T> for $ty<T> {
+            #[inline]
+            fn borrow_mut(&mut self) -> &mut T {
+                &mut *self
+            }
+        }
+        impl<T> AsRef<T> for $ty<T> {
+            #[inline]
+            fn as_ref(&self) -> &T {
+                &self
+            }
+        }
+        impl<T> AsMut<T> for $ty<T> {
+            #[inline]
+            fn as_mut(&mut self) -> &mut T {
+                &mut *self
             }
         }
         formatter!(@std::fmt::Debug, $ty |$opts| $expr);

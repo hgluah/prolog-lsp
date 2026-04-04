@@ -1,9 +1,13 @@
 use lsp_types::{
     CompletionOptions, InitializeParams, InitializeResult, OneOf, PositionEncodingKind,
-    ServerCapabilities, ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind,
+    SemanticTokenModifier, SemanticTokenType, SemanticTokensLegend, SemanticTokensOptions,
+    SemanticTokensServerCapabilities, ServerCapabilities, ServerInfo, TextDocumentSyncCapability,
+    TextDocumentSyncKind,
 };
 
 use texter::core::text::Text;
+
+use crate::lsp::SemanticTokenHandler;
 
 pub type TextFn = fn(String) -> Text;
 
@@ -34,6 +38,15 @@ pub fn initialize_result(p: &InitializeParams) -> (TextFn, InitializeResult) {
                 ..Default::default()
             }),
             references_provider: Some(OneOf::Left(true)),
+            inlay_hint_provider: Some(OneOf::Left(true)),
+            document_symbol_provider: Some(OneOf::Left(true)),
+            semantic_tokens_provider: Some(
+                SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
+                    range: Some(true),
+                    legend: SemanticTokenHandler::legend(),
+                    ..Default::default()
+                }),
+            ),
             ..Default::default()
         },
         server_info: Some(ServerInfo {

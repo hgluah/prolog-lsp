@@ -1,8 +1,12 @@
 mod completions;
 mod diagnostics;
 mod document;
+mod inlay_hints;
 pub mod queries;
 mod references;
+mod symbols;
+
+pub use symbols::SemanticTokenHandler;
 
 use anyhow::Context;
 use lsp_server::{Connection, Message, Response};
@@ -12,7 +16,10 @@ use lsp_types::{
         DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument,
         Notification, PublishDiagnostics,
     },
-    request::{Completion, References, Request},
+    request::{
+        Completion, DocumentSymbolRequest, InlayHintRequest, References, Request,
+        SemanticTokensRangeRequest,
+    },
 };
 use tracing::warn;
 use tree_sitter::Parser;
@@ -23,7 +30,9 @@ use crate::{
         completions::completions,
         diagnostics::diagnostics,
         document::{Document, Documents},
+        inlay_hints::inlay_hints,
         references::references,
+        symbols::{document_symbols, semantic_tokens},
     },
 };
 use texter::change::{Change, GridIndex};
@@ -162,9 +171,49 @@ fn handle_request(
 
             let document = docs
                 .get_mut(&uri)
-                .context("Requested completion for unknown document.")?;
+                .context("Requested references for unknown document.")?;
             document.recompute(parser, Some(&mut pos))?;
             res = references(pos, p.context, &docs, uri)?;
+            Response::new_ok(req.id, res)
+        }
+        InlayHintRequest::METHOD => {
+            let p: <InlayHintRequest as Request>::Params = serde_json::from_value(req.params)?;
+            let res: <InlayHintRequest as Request>::Result;
+
+            let uri = p.text_document.uri;
+
+            let document = docs
+                .get_mut(&uri)
+                .context("Requested inlay hints for unknown document.")?;
+            document.recompute(parser, None)?;
+            res = inlay_hints(p.range, document)?;
+            Response::new_ok(req.id, res)
+        }
+        DocumentSymbolRequest::METHOD => {
+            let p: <DocumentSymbolRequest as Request>::Params = serde_json::from_value(req.params)?;
+            let res: <DocumentSymbolRequest as Request>::Result;
+
+            let uri = p.text_document.uri;
+
+            let document = docs
+                .get_mut(&uri)
+                .context("Requested document symbols for unknown document.")?;
+            document.recompute(parser, None)?;
+            res = document_symbols(document)?;
+            Response::new_ok(req.id, res)
+        }
+        SemanticTokensRangeRequest::METHOD => {
+            let p: <SemanticTokensRangeRequest as Request>::Params =
+                serde_json::from_value(req.params)?;
+            let res: <SemanticTokensRangeRequest as Request>::Result;
+
+            let uri = p.text_document.uri;
+
+            let document = docs
+                .get_mut(&uri)
+                .context("Requested document symbols for unknown document.")?;
+            document.recompute(parser, None)?;
+            res = semantic_tokens(p.range, document)?;
             Response::new_ok(req.id, res)
         }
         method => {
