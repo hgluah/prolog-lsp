@@ -160,7 +160,7 @@ pub fn completions(pos: GridIndex, document: &Document) -> anyhow::Result<Comple
                 return Ok(CompletionResponse::Array(filter_prefixed(
                     name,
                     // TODO Also add imports
-                    document.functions_and_facts.iter().map(|function| {
+                    (&document.functions_and_facts).into_iter().map(|function| {
                         item!(
                             item!(@list
                                 (&*function.head.name).to_owned(),
@@ -185,25 +185,27 @@ pub fn completions(pos: GridIndex, document: &Document) -> anyhow::Result<Comple
     let function_name = function_name.utf8_text(&document.text.text.as_bytes())?;
 
     // TODO Also add imports
-    let completions = document.functions_and_facts.iter().filter_map(|function| {
-        if &*function.head.name == function_name {
-            let mut indices = indices.iter().copied().rev();
-            let mut param = function
-                .head
-                .parameters
-                .get((indices.next().unwrap() + offset) / 2)?;
-            for index in indices {
-                param = match param {
-                    Argument::List(args) => args.get(index / 2)?,
-                    Argument::Function(node) => node.parameters.get((index + offset) / 2)?,
-                    _ => return None,
-                };
+    let completions = (&document.functions_and_facts)
+        .into_iter()
+        .filter_map(|function| {
+            if &*function.head.name == function_name {
+                let mut indices = indices.iter().copied().rev();
+                let mut param = function
+                    .head
+                    .parameters
+                    .get((indices.next().unwrap() + offset) / 2)?;
+                for index in indices {
+                    param = match param {
+                        Argument::List(args) => args.get(index / 2)?,
+                        Argument::Function(node) => node.parameters.get((index + offset) / 2)?,
+                        _ => return None,
+                    };
+                }
+                Some(param)
+            } else {
+                None
             }
-            Some(param)
-        } else {
-            None
-        }
-    });
+        });
 
     Ok(CompletionResponse::Array(filter_prefixed(
         name,

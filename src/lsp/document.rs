@@ -17,7 +17,10 @@ use texter::{change::GridIndex, core::text::Text};
 
 use crate::{
     lsp::queries::{clauses, module},
-    util::sorted_small_set::{SortedSmallSet, sss_handler},
+    util::{
+        formatting::NoAlternate,
+        sorted_small_set::{SortedSmallSet, sss_handler},
+    },
 };
 
 use super::queries::CLAUSES;
@@ -27,10 +30,10 @@ impl Document {
     pub fn new(tree: Tree, text: Text, parser: &mut Parser) -> anyhow::Result<Self> {
         let mut res = Self {
             tree,
-            text,
+            text: text.into(),
             imports: SmallVec::new(),
             exports: SmallVec::new(),
-            functions_and_facts: SmallVec::new(),
+            functions_and_facts: SortedSmallSet::empty(),
         };
         res.recompute(parser, None)?;
         Ok(res)
@@ -64,13 +67,13 @@ impl Document {
                 Err(err) => return Ok(Err(err)),
             };
             Ok(Ok(Exports {
-                module_name: MiniNode::new(module_name, &self.text.text)?,
+                module_name: MiniNode::new(module_name, &self.text.text)?.into(),
                 exported: exported
                     .into_iter()
                     .map(|(function, arity)| {
                         Ok((
-                            MiniNode::new(function, &self.text.text)?,
-                            MiniNode::new(arity, &self.text.text)?,
+                            MiniNode::new(function, &self.text.text)?.into(),
+                            MiniNode::new(arity, &self.text.text)?.into(),
                         ))
                     })
                     .collect::<Result<_, std::str::Utf8Error>>()?,
@@ -140,7 +143,7 @@ impl Document {
                                     | Argument::Atom(_)
                                     | Argument::String(_) => (),
                                     Argument::Variable(var) => unsafe {
-                                        res.entry(&var).insert(UnprocessedVariable {
+                                        res.push(UnprocessedVariable {
                                             declaration: var.clone(),
                                             domain_all_of: smallvec![VariableUsage::NestedCall(
                                                 nested_path.clone()
@@ -304,19 +307,15 @@ impl Document {
                     .collect::<VariableDomainCollector<{ ReductionKind::Intersection }>>().0;
 
                 unsafe {
-                    function
-                        .variables
-                        .entry(&caller_var.declaration)
-                        .insert(Variable {
-                            declaration: caller_var.declaration,
-                            domain,
-                            defined_starting_from_point: caller_var.defined_starting_from_point,
-                        })
+                    function.variables.push(Variable {
+                        declaration: caller_var.declaration,
+                        domain,
+                        defined_starting_from_point: caller_var.defined_starting_from_point,
+                    })
                 };
             }
+            unsafe { self.functions_and_facts.push(function) };
         }
-
-        // self.functions_and_facts.extend(functions);
 
         info!("{self:#?}");
 
@@ -389,16 +388,16 @@ impl Document {
 #[derive(Debug)]
 pub struct Document {
     pub tree: Tree,
-    pub text: Text,
+    pub text: NoAlternate<Text>,
     pub imports: SmallVec<[MiniNode; 16]>, // TODO Construct
     pub exports: SmallVec<[Result<Exports, MiniNode>; 1]>,
-    /// Binary searchable by name
-    pub functions_and_facts: SmallVec<[FunctionOrFact; 32]>,
+    pub functions_and_facts: SortedSmallSet<FunctionOrFact, 32, FuncToName>,
 }
+sss_handler!(<()> pub FuncToName<FunctionOrFact> Key = str; |x| &x.head.name);
 #[derive(Debug)]
 pub struct Exports {
-    pub module_name: MiniNode,
-    pub exported: SmallVec<[(MiniNode, MiniNode); 32]>,
+    pub module_name: NoAlternate<MiniNode>,
+    pub exported: SmallVec<[(NoAlternate<MiniNode>, NoAlternate<MiniNode>); 32]>,
 }
 #[derive(Debug)]
 pub struct FunctionHeadOrFact {

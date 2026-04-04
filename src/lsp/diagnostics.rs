@@ -68,8 +68,8 @@ fn diagnostics_single(_documents: &Documents, doc: &Document) -> impl Iterator<I
             };
 
             // O(n^2) but n is so small that it's prob better than having to alloc a map
-            !doc.functions_and_facts.iter().any(|function| {
-                (&*function.head.name) == &**exported
+            !(&doc.functions_and_facts).into_iter().any(|function| {
+                (&*function.head.name) == &***exported
                     && arity.parse() == Ok(function.head.parameters.len()) // TODO Allow arity to be a hex literal etc
             })
         })
@@ -77,7 +77,7 @@ fn diagnostics_single(_documents: &Documents, doc: &Document) -> impl Iterator<I
             Ok((function, arity)) => Diagnostic {
                 range: function.position,
                 severity: Some(DiagnosticSeverity::ERROR),
-                message: format!("Export {}/{} not defined", &**function, &**arity),
+                message: format!("Export {}/{} not defined", &***function, &***arity),
                 ..Default::default()
             },
             Err(msg) => Diagnostic {
@@ -115,7 +115,7 @@ pub fn diagnostics(
             .filter(move |(_, document)| {
                 document.imports.iter().any(|import| {
                     main_doc.exports.iter().any(
-                        |module| matches!(module, Ok(module) if &*module.module_name == &**import),
+                        |module| matches!(module, Ok(module) if &**module.module_name == &**import),
                     )
                 })
             })

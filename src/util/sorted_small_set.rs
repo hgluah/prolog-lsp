@@ -218,6 +218,10 @@ impl_sorted_small_set!({
         &mut self.0
     }
     #[inline]
+    pub fn clear(&mut self) {
+        self.0.clear()
+    }
+    #[inline]
     pub fn pop(&mut self) -> Option<T> {
         self.0.pop()
     }
@@ -234,6 +238,11 @@ impl_sorted_small_set!({
     #[inline]
     pub unsafe fn get_mut(&mut self, item: &Handler::Key) -> Option<&mut T> {
         unsafe { self.entry(item).get() }
+    }
+    /// SAFETY: The caller cannot modify data that modifies the order of the elements
+    #[inline]
+    pub unsafe fn push(&mut self, item: T) -> &mut T {
+        unsafe { self.entry(Handler::key(&item)).insert(item) }
     }
     #[inline]
     pub fn entry<'a>(&'a mut self, item: &Handler::Key) -> SSSEntry<'a, [T; N], Handler> {
