@@ -1,6 +1,6 @@
 use std::ops::ControlFlow;
 
-trait MyTry {
+pub trait MyTry {
     type Output;
     type Residual;
 

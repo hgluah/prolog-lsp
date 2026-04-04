@@ -6,23 +6,38 @@ use sorted_iter::{
     SortedIterator, assume::AssumeSortedByItemExt, sorted_iterator::AssumeSortedByItem,
 };
 
+macro_rules! sss_handler {
+    (<($($generic:tt)*)> $vis:vis $ty:ident<$T:ty>
+        Key = $Key:ty;
+        |$x:pat_param| $key_expr:expr
+        $(, |$old:pat_param, $new:pat_param| $reduce_expr:expr)? $(,)?
+    ) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+        $vis struct $ty;
+        impl<$($generic)*> $crate::util::sorted_small_set::SSSHandler<$T> for $ty {
+            type Key = $Key;
+            fn key($x: &$T) -> &Self::Key {
+                $key_expr
+            }
+            $(
+                fn reduce($old: &mut $T, $new: $T) {
+                    $reduce_expr
+                }
+            )?
+        }
+    };
+}
+pub(crate) use sss_handler;
 pub trait SSSHandler<T> {
     type Key: ?Sized + Ord;
     fn key(x: &T) -> &Self::Key;
     fn reduce(old: &mut T, new: T) {
+        debug_assert!(Self::key(old) == Self::key(&new));
         *old = new;
     }
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct Noop;
-impl<T: Ord> SSSHandler<T> for Noop {
-    type Key = T;
-
-    /// See [`std::convert::identity`]
-    fn key(x: &T) -> &T {
-        x
-    }
-}
+// See [`std::convert::identity`]
+sss_handler!(<(T: Ord)> pub Noop<T> Key = T; |x| x);
 
 pub struct SSSEntry<'a, Arr: Array, Handler: SSSHandler<Arr::Item>>(
     &'a mut SmallVec<Arr>,
@@ -165,7 +180,17 @@ impl_sorted_small_set!(FromIterator<T> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
         let mut res = iter.into_iter().collect::<SmallVec<_>>();
         res.sort_unstable_by(|a, b| Ord::cmp(Handler::key(a), Handler::key(b)));
-        res.dedup_by(|a, b| Handler::key(a) == Handler::key(b));
+
+        if let Some(prev_last_idx) = res.len().checked_sub(2) {
+            for idx in 0..=prev_last_idx {
+                if Handler::key(unsafe { res.get_unchecked(idx) })
+                    == Handler::key(unsafe { res.get_unchecked(idx.unchecked_add(1)) }) {
+                    let last = unsafe { res.pop().unwrap_unchecked() };
+                    Handler::reduce(unsafe { res.get_unchecked_mut(idx) }, last);
+                }
+            }
+        }
+
         Self(res, PhantomData)
     }
 });
@@ -182,6 +207,20 @@ impl_sorted_small_set!({
     pub fn len(&self) -> usize {
         self.0.len()
     }
+    /// SAFETY: The caller cannot modify data that modifies the order of the elements
+    #[inline]
+    pub unsafe fn as_slice(&self) -> &[T] {
+        &self.0
+    }
+    /// SAFETY: The caller cannot modify data that modifies the order of the elements
+    #[inline]
+    pub unsafe fn as_mut_slice(&mut self) -> &mut [T] {
+        &mut self.0
+    }
+    #[inline]
+    pub fn pop(&mut self) -> Option<T> {
+        self.0.pop()
+    }
 
     /// SAFETY: The caller cannot modify data that modifies the order of the elements
     #[inline]
@@ -197,7 +236,7 @@ impl_sorted_small_set!({
         unsafe { self.entry(item).get() }
     }
     #[inline]
-    pub fn entry(&mut self, item: &Handler::Key) -> SSSEntry<[T; N], Handler> {
+    pub fn entry<'a>(&'a mut self, item: &Handler::Key) -> SSSEntry<'a, [T; N], Handler> {
         let idx = self.0.binary_search_by_key(&item, Handler::key);
         SSSEntry(&mut self.0, idx, PhantomData)
     }

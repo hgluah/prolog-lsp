@@ -1,20 +1,15 @@
 use std::{
     borrow::Borrow,
-    collections::BTreeMap,
     fmt::{self, Write},
-    iter::{Enumerate, Map, Peekable},
-    marker::{ConstParamTy, PhantomData},
+    iter::{Enumerate, Peekable},
+    marker::ConstParamTy,
     ops::Deref,
     rc::Rc,
-    slice::IterMut,
 };
 
-use clap::Arg;
-use either::Either;
 use lsp_types::{Range, Uri};
 use rustc_hash::FxHashMap;
 use smallvec::{SmallVec, smallvec};
-use smol_str::ToSmolStr;
 use tracing::info;
 use tree_sitter::{Node, Parser, Point, QueryCursor, StreamingIterator, Tree};
 
@@ -22,10 +17,7 @@ use texter::{change::GridIndex, core::text::Text};
 
 use crate::{
     lsp::queries::{clauses, module},
-    util::{
-        self_aware_iter::SelfAwareIterator,
-        sorted_small_set::{SSSHandler, SortedSmallSet},
-    },
+    util::sorted_small_set::{SortedSmallSet, sss_handler},
 };
 
 use super::queries::CLAUSES;
@@ -87,7 +79,7 @@ impl Document {
         .collect::<Result<_, std::str::Utf8Error>>()?;
 
         let mut cursor = QueryCursor::new();
-        let mut functions = clauses(
+        let mut unprocessed_functions = clauses(
             &mut cursor,
             self.tree.root_node(),
             self.text.text.as_bytes(),
@@ -116,15 +108,11 @@ impl Document {
                                 .unwrap_or_else(|_| todo!() /* TODO */),
                             variables: SortedSmallSet::empty(),
                         };
-                        struct UnprocessedVariablesGroupper;
-                        impl SSSHandler<UnprocessedVariable> for UnprocessedVariablesGroupper {
-                            type Key = str;
-
-                            fn key(x: &UnprocessedVariable) -> &Self::Key {
-                                &x.declaration
-                            }
-
-                            fn reduce(old: &mut UnprocessedVariable, mut new: UnprocessedVariable) {
+                        sss_handler!(
+                            <()>
+                            UnprocessedVariablesGroupper<UnprocessedVariable> Key = str;
+                            |x| &x.declaration,
+                            |old, mut new| {
                                 debug_assert_eq!(old.declaration.text.as_str(), &*new.declaration);
                                 old.domain_all_of.append(&mut new.domain_all_of);
                                 if let Some(new) = new.defined_starting_from_point {
@@ -135,7 +123,7 @@ impl Document {
                                     }
                                 }
                             }
-                        }
+                        );
                         let mut unprocessed_params = SortedSmallSet::empty();
                         function.head.parameters.iter().for_each(|arg| {
                             fn variables(
@@ -196,15 +184,27 @@ impl Document {
                 }
             }
         })
-        .fold(BTreeMap::<_, Vec<_>>::new(), |mut acc, x| {
-            acc.entry(x.0).or_default().push(x.1);
-            acc
-        });
+        .map(|(k, v)| (k, smallvec![v]))
+        .collect::<SortedSmallSet<(_, SmallVec<[_; 4]>), 4, UnprocessedFunctionsHandler>>();
+        sss_handler!(
+            <(T, const N: usize)>
+            UnprocessedFunctionsHandler<(Rc<String>, SmallVec<[T; N]>)> Key = str;
+            |x| &x.0,
+            |old, mut new| {
+                debug_assert_eq!(old.0, new.0);
+                old.1.append(&mut new.1);
+            }
+        );
 
-        for (function, unprocessed_params) in
-            // TODO Replace with some kind of pop then push it to another global dict after it's finished
-            functions.values_mut().flatten()
-        {
+        while let Some((mut function, mut unprocessed_params)) = 'next_to_be_processed: {
+            while let Some((_, v)) = unsafe { unprocessed_functions.as_mut_slice() }.last_mut() {
+                if let Some(res) = v.pop() {
+                    break 'next_to_be_processed Some(res);
+                }
+                unsafe { unprocessed_functions.pop().unwrap_unchecked() };
+            }
+            None
+        } {
             for caller_var in unprocessed_params.drain(..) {
                 let domain = caller_var
                     .domain_all_of
@@ -228,7 +228,7 @@ impl Document {
                                 let domain_any_of = std::iter::chain(
                                     // TODO sure, let's add the first one, but we also need to add all the interemediates THAT ARE NOT INCLUDED BEFORE:
                                     //  e.g. example(test(X, Y)) should check other example's, fine, but also the requirements of test THAT ARE NOT INCLUDED IN THE PREVIOUS example'S
-                                    functions[first_nested].iter(),
+                                    (&unsafe { unprocessed_functions.get(first_nested).expect("TODO") }.1).into_iter(),
                                     None, // TODO Add imported functions
                                 );
                                 let domain_any_of = domain_any_of
@@ -507,13 +507,7 @@ pub struct FunctionOrFact {
     pub head: FunctionHeadOrFact,
     pub variables: SortedSmallSet<Variable, 16, VarToName>,
 }
-struct VarToName;
-impl SSSHandler<Variable> for VarToName {
-    type Key = str;
-    fn key(x: &Variable) -> &str {
-        &x.declaration
-    }
-}
+sss_handler!(<()> VarToName<Variable> Key = str; |x| &x.declaration);
 #[derive(Debug)]
 pub enum Argument<Function: Deref<Target = FunctionHeadOrFact> = Box<FunctionHeadOrFact>> {
     Number(MiniNode),
@@ -734,40 +728,46 @@ impl VariableDomain {
         arg: &Argument,
         mut parameter_resolver: impl FnMut(&MiniNode) -> Rc<Self>,
     ) -> Rc<Self> {
-        if let Argument::Variable(var) = arg {
-            Self::try_static(parameter_resolver(var))
-        } else {
-            let res = Self {
-                kind: Some(ComplexKind {
-                    simple_kinds: match arg {
-                        Argument::Number(_) => Some(VariableKind::Number),
-                        Argument::Atom(atom) => Some(VariableKind::Atom(atom.text.clone())),
-                        Argument::String(str) => Some(VariableKind::String(str.text.clone())),
-                        Argument::Function(function) => {
-                            Some(VariableKind::Function(function.name.text.clone()))
+        fn inner(
+            arg: &Argument,
+            parameter_resolver: &mut impl FnMut(&MiniNode) -> Rc<VariableDomain>,
+        ) -> Rc<VariableDomain> {
+            if let Argument::Variable(var) = arg {
+                VariableDomain::try_static(parameter_resolver(var))
+            } else {
+                let res = VariableDomain {
+                    kind: Some(ComplexKind {
+                        simple_kinds: match arg {
+                            Argument::Number(_) => Some(VariableKind::Number),
+                            Argument::Atom(atom) => Some(VariableKind::Atom(atom.text.clone())),
+                            Argument::String(str) => Some(VariableKind::String(str.text.clone())),
+                            Argument::Function(function) => {
+                                Some(VariableKind::Function(function.name.text.clone()))
+                            }
+                            _ => None,
                         }
-                        _ => None,
-                    }
-                    .map(SortedSmallSet::single)
-                    .unwrap_or(SortedSmallSet::empty()),
-                    array_kind: match arg {
-                        Argument::List(args) => Some((
-                            args.into_iter()
-                                .map(|x| Self::from_argument(x, &mut parameter_resolver))
-                                .collect::<VariableDomainCollector<{ ReductionKind::Union }>>()
-                                .0,
-                            args.is_empty(),
-                        )),
-                        _ => None,
+                        .map(SortedSmallSet::single)
+                        .unwrap_or(SortedSmallSet::empty()),
+                        array_kind: match arg {
+                            Argument::List(args) => Some((
+                                args.into_iter()
+                                    .map(|x| inner(x, parameter_resolver))
+                                    .collect::<VariableDomainCollector<{ ReductionKind::Union }>>()
+                                    .0,
+                                args.is_empty(),
+                            )),
+                            _ => None,
+                        },
+                    }),
+                    references_variables: match arg {
+                        Argument::Variable(var) => SortedSmallSet::single(var.text.clone()),
+                        _ => SortedSmallSet::empty(),
                     },
-                }),
-                references_variables: match arg {
-                    Argument::Variable(var) => SortedSmallSet::single(var.text.clone()),
-                    _ => SortedSmallSet::empty(),
-                },
-            };
-            Self::try_static(res)
+                };
+                VariableDomain::try_static(res)
+            }
         }
+        inner(arg, &mut parameter_resolver)
     }
 }
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
