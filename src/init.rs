@@ -1,8 +1,7 @@
 use lsp_types::{
     CompletionOptions, InitializeParams, InitializeResult, OneOf, PositionEncodingKind,
-    SemanticTokenModifier, SemanticTokenType, SemanticTokensLegend, SemanticTokensOptions,
-    SemanticTokensServerCapabilities, ServerCapabilities, ServerInfo, TextDocumentSyncCapability,
-    TextDocumentSyncKind,
+    SemanticTokensOptions, SemanticTokensServerCapabilities, ServerCapabilities, ServerInfo,
+    TextDocumentSyncCapability, TextDocumentSyncKind,
 };
 
 use texter::core::text::Text;

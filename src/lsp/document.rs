@@ -7,6 +7,7 @@ use std::{
     rc::Rc,
 };
 
+use anyhow::bail;
 use itertools::Itertools;
 use lsp_types::{Range, Uri};
 use rustc_hash::FxHashMap;
@@ -135,8 +136,7 @@ impl Document {
                 };
 
                 let function = FunctionOrFact {
-                    head: Self::parse_funtion_head(function, &self.text.text)
-                        .unwrap_or_else(|_| todo!() /* TODO */),
+                    head: Self::parse_funtion_head(function, &self.text.text)?,
                     position_including_body: MiniNode::pos(node).into(),
                     variables: SortedSmallSet::empty(),
                     body_variables: body
@@ -233,10 +233,10 @@ impl Document {
                 if let Some(body) = body {
                     function_heads(&mut cursor_2, body, self.text.text.as_bytes())
                         .copied()
-                        .map(|function| Self::parse_funtion_head(function, &self.text.text)
-                            .unwrap_or_else(|_| todo!() /* TODO */))
-                        .for_each(|function|
-                            variables(&mut unprocessed_params, &Argument::Function(&function), nested_path));
+                        .map(|function| Self::parse_funtion_head(function, &self.text.text))
+                        .try_for_each(|function| function.map(|function|
+                            variables(&mut unprocessed_params, &Argument::Function(&function), nested_path
+                        )))?;
                 }
 
                 return Ok(
@@ -295,12 +295,11 @@ impl Document {
                                 let domain_any_of = std::iter::chain(
                                     std::iter::chain(
                                         unsafe { self.functions_and_facts.get(first_nested) }.iter().map(|function| (function, const { &SortedSmallSet::empty() })),
-                                        // TODO sure, let's add the first one, but we also need to add all the interemediates THAT ARE NOT INCLUDED BEFORE:
-                                        //  e.g. example(test(X, Y)) should check other example's, fine, but also the requirements of test THAT ARE NOT INCLUDED IN THE PREVIOUS example'S
                                         unsafe { unprocessed_functions.get(first_nested) }.into_iter().flat_map(|(_, functions)| functions.into_iter().map(|(a, b)| (a, b)))
                                     ),
                                     None, // TODO Add imported functions
                                 );
+                                // TODO If there are no functions that match the given name, that should be a hard error, which it kind of is since it will be converted to !, but it should be more explicit as to why
                                 let domain_any_of = domain_any_of
                                     .filter_map(|(callee, callees_unprocessed_params)|
                                         // TODO If there's test(X,Y):-... and test(X,Y,Z):-..., then example(test(X,Y)):-... would try to get info about both, even though it shouldn't.
@@ -427,10 +426,7 @@ impl Document {
             :-
                 test1(hello).
              */
-            return Err(todo!(
-                "{:#}",
-                function.parent().unwrap().utf8_text(text.as_ref()).unwrap()
-            ));
+            bail!("{:#}", function.parent().unwrap());
         }
         let function_name = function.child_by_field_name("function").unwrap();
         let args = function.child(2).unwrap();
@@ -438,15 +434,13 @@ impl Document {
             || function_name.child_count() != 0
             || args.kind() != "arg_list"
         {
-            return Err(todo!()); // TODO
+            bail!("{:#}", function.parent().unwrap()); // TODO
         }
 
         let mut cursor = args.walk();
 
         Ok(FunctionHeadOrFact {
-            name: MiniNode::new(function_name, text.as_ref())
-                .unwrap_or_else(|_| todo!() /* TODO */)
-                .into(),
+            name: MiniNode::new(function_name, text.as_ref())?.into(),
             position_including_params: MiniNode::pos(function).into(),
             parameters: {
                 let mut res = SmallVec::new();

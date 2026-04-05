@@ -11,10 +11,10 @@ pub use symbols::SemanticTokenHandler;
 use anyhow::Context;
 use lsp_server::{Connection, Message, Response};
 use lsp_types::{
-    Uri,
+    MessageType, ShowMessageParams, Uri,
     notification::{
         DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument,
-        Notification, PublishDiagnostics,
+        Notification, PublishDiagnostics, ShowMessage,
     },
     request::{
         Completion, DocumentSymbolRequest, InlayHintRequest, References, Request,
@@ -63,6 +63,14 @@ pub fn main_loop(text_fn: TextFn, con: Connection) -> anyhow::Result<()> {
         if let Err(err) = handle_msg() {
             let err = err.into_boxed_dyn_error();
             error!(err);
+            con.sender
+                .send(Message::Notification(lsp_server::Notification::new(
+                    <ShowMessage as Notification>::METHOD.to_owned(),
+                    ShowMessageParams {
+                        typ: MessageType::ERROR,
+                        message: err.to_string(),
+                    },
+                )))?;
         }
     }
 
