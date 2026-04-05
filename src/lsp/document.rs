@@ -17,7 +17,7 @@ use tree_sitter::{Node, Parser, Point, QueryCursor, StreamingIterator, Tree};
 use texter::{change::GridIndex, core::text::Text};
 
 use crate::{
-    lsp::queries::{Ancestors, clauses, module},
+    lsp::queries::{self, Ancestors, clauses, function_heads, module},
     util::{
         formatting::NoAlternate,
         sorted_small_set::{SortedSmallSet, SortedSmallVec, sss_handler, ssv_handler},
@@ -82,27 +82,28 @@ impl Document {
         })
         .collect::<Result<_, std::str::Utf8Error>>()?;
 
-        let mut cursor = QueryCursor::new();
+        let mut cursor_1 = QueryCursor::new();
+        let mut cursor_2 = QueryCursor::new();
         let mut unprocessed_functions = clauses(
-            &mut cursor,
+            &mut cursor_1,
             self.tree.root_node(),
             self.text.text.as_bytes(),
         )
         .map_deref(|&x| x)
         .map(|(kind, node)| {
             'err: {
-                let op_check = |node: Node| {
+                let is_valid_opfun = |node: Node| {
                     node.child_by_field_name("operator")
                         .unwrap()
                         .utf8_text(&self.text.text.as_bytes())
-                        != Ok(":-")
-                        || node.child_count() != 3
+                        == Ok(":-")
+                        && node.child_count() == 3
                 };
-                let function = match kind {
+                let (function, body) = match kind {
                     CLAUSES::Atom | CLAUSES::Function => {
                         if Ancestors(node).any(|parent| match parent.kind() {
                             "functional_notation" => true,
-                            "operator_notation" => op_check(parent),
+                            "operator_notation" => is_valid_opfun(parent),
                             _ => false,
                         }) {
                             return Ok(None);
@@ -117,17 +118,19 @@ impl Document {
                                     parameters: SmallVec::new_const(),
                                 },
                                 variables: SortedSmallSet::empty(),
+                                body_variables: SortedSmallVec::empty(),
                             };
                             unsafe { self.functions_and_facts.push(item) };
                             return Ok(None);
                         }
-                        node
+                        (node, None)
                     }
-                    CLAUSES::Op => {
-                        if op_check(node) {
-                            break 'err;
-                        }
-                        node.child(0).unwrap()
+                    CLAUSES::Op => if is_valid_opfun(node) {
+                        // TODO Everywhere where i use .child(n) is wrong, since there might be children from the "extra" category, such as a comment
+                        //      Same thing goes for child_count()
+                        (node.child(0).unwrap(), Some(node.child(2).unwrap()))
+                    } else {
+                        break 'err;
                     }
                 };
 
@@ -136,13 +139,34 @@ impl Document {
                         .unwrap_or_else(|_| todo!() /* TODO */),
                     position_including_body: MiniNode::pos(node).into(),
                     variables: SortedSmallSet::empty(),
+                    body_variables: body
+                        .map(|body|
+                            // I don't know who the fuck created this, but
+                            // test(X) :-
+                            //   a,
+                            //   b.
+                            // Is represented as
+                            // ,
+                            //   :-
+                            //     test(X)
+                            //     a
+                            //   b
+                            // TODO replace that shitty grammar
+
+                            queries::variables(&mut cursor_2, body, self.text.text.as_bytes())
+                                .copied()
+                                .map(|node| MiniNode::new(node, &self.text.text))
+                                .collect::<Result<_, _>>()
+                        )
+                        .transpose()?
+                        .unwrap_or_default(),
                 };
                 sss_handler!(
                     <()>
                     UnprocessedVariablesGroupper<UnprocessedVariable> Key = str;
                     |x| &x.declaration,
                     |old, mut new| {
-                        debug_assert_eq!(old.declaration.text.as_str(), &*new.declaration);
+                        debug_assert_eq!(old.declaration, new.declaration);
                         old.domain_all_of.append(&mut new.domain_all_of);
                         if let Some(new) = new.defined_starting_from_point {
                             match &mut old.defined_starting_from_point {
@@ -166,7 +190,7 @@ impl Document {
                         Argument::Number(_) | Argument::Atom(_) | Argument::String(_) => (),
                         Argument::Variable(var) => unsafe {
                             res.push(UnprocessedVariable {
-                                declaration: var.clone(),
+                                declaration: var.text.clone(),
                                 domain_all_of: smallvec![VariableUsage::NestedCall(
                                     nested_path.clone()
                                 )],
@@ -197,8 +221,23 @@ impl Document {
                         }
                     }
                 }
+                let nested_path = &mut SmallVec::new_const();
                 let mut unprocessed_params = SortedSmallSet::empty();
-                variables(&mut unprocessed_params, &Argument::Function(&function.head), &mut SmallVec::new_const());
+                variables(&mut unprocessed_params, &Argument::Function(&function.head), nested_path);
+                (&mut unprocessed_params)
+                    .into_iter()
+                    .for_each(|var| {
+                        var.defined_starting_from_point = None;
+                        var.domain_all_of.clear();
+                    });
+                if let Some(body) = body {
+                    function_heads(&mut cursor_2, body, self.text.text.as_bytes())
+                        .copied()
+                        .map(|function| Self::parse_funtion_head(function, &self.text.text)
+                            .unwrap_or_else(|_| todo!() /* TODO */))
+                        .for_each(|function|
+                            variables(&mut unprocessed_params, &Argument::Function(&function), nested_path));
+                }
 
                 return Ok(
                     if unprocessed_params.is_empty() {
@@ -209,7 +248,7 @@ impl Document {
                     }
                 );
             }
-            todo!() // TODO
+            todo!("{node:#}") // TODO
         })
         .filter_map_ok(std::convert::identity)
         .map_ok(|(k, v)| (k, smallvec![v]))
@@ -258,7 +297,7 @@ impl Document {
                                         unsafe { self.functions_and_facts.get(first_nested) }.iter().map(|function| (function, const { &SortedSmallSet::empty() })),
                                         // TODO sure, let's add the first one, but we also need to add all the interemediates THAT ARE NOT INCLUDED BEFORE:
                                         //  e.g. example(test(X, Y)) should check other example's, fine, but also the requirements of test THAT ARE NOT INCLUDED IN THE PREVIOUS example'S
-                                        (&unsafe { unprocessed_functions.get(first_nested).expect("TODO") }.1).into_iter().map(|(a, b)| (a, b))
+                                        unsafe { unprocessed_functions.get(first_nested) }.into_iter().flat_map(|(_, functions)| functions.into_iter().map(|(a, b)| (a, b)))
                                     ),
                                     None, // TODO Add imported functions
                                 );
@@ -337,7 +376,7 @@ impl Document {
 
                 unsafe {
                     function.variables.push(Variable {
-                        declaration: caller_var.declaration.text,
+                        declaration: caller_var.declaration,
                         domain,
                         defined_starting_from_point: caller_var.defined_starting_from_point,
                     })
@@ -548,8 +587,10 @@ pub struct FunctionOrFact {
     pub head: FunctionHeadOrFact,
     pub position_including_body: NoAlternate<Range>,
     pub variables: SortedSmallSet<Variable, 16, VarToName>,
+    pub body_variables: SortedSmallVec<MiniNode, 16, MiniNodeToName>,
 }
 sss_handler!(<()> pub VarToName<Variable> Key = str; |x| &x.declaration);
+ssv_handler!(<()> pub MiniNodeToName<MiniNode> Key = str; |x| &x);
 #[derive(Debug)]
 pub enum Argument<Function: Deref<Target = FunctionHeadOrFact> = Box<FunctionHeadOrFact>> {
     Number(MiniNode),
@@ -706,6 +747,11 @@ impl<const RK: ReductionKind> FromIterator<Rc<VariableDomain>> for VariableDomai
         }))
     }
 }
+impl ComplexKind {
+    pub fn is_invalid(&self) -> bool {
+        matches!(&self, ComplexKind{ simple_kinds: x, array_kind: None } if x.is_empty())
+    }
+}
 impl VariableDomain {
     thread_local! {
         static ANY: Rc<VariableDomain> = Rc::new(const {
@@ -762,8 +808,8 @@ impl VariableDomain {
         .unwrap_or_else(|| item.into())
     }
 
-    pub fn is_ill_formed(&self) -> bool {
-        matches!(&self.kind, Some(ComplexKind{ simple_kinds: x, array_kind: None }) if x.is_empty())
+    pub fn is_invalid(&self) -> bool {
+        matches!(&self.kind, Some(x) if x.is_invalid())
     }
     pub fn is_not_complex_type(&self) -> bool {
         match &self.kind {
@@ -834,7 +880,7 @@ pub enum VariableKind {
 }
 #[derive(Debug)]
 struct UnprocessedVariable {
-    declaration: MiniNode,
+    declaration: Rc<String>,
     domain_all_of: SmallVec<[VariableUsage; 2]>,
     defined_starting_from_point: Option<Point>,
 }
@@ -856,8 +902,8 @@ pub struct SingleFunctionOrArrayCall {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MiniNode {
-    pub position: Range,
     pub text: Rc<String>,
+    pub position: Range,
 }
 impl Ord for MiniNode {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {

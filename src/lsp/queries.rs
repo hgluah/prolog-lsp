@@ -100,6 +100,19 @@ query!(
 );
 
 query!(
+    @node-filter m => true,
+    FUNCTION_HEADS,
+    r#"(functional_notation) @function"#,
+    function: Function,
+);
+
+query!(
+    VARIABLES,
+    r#"(variable_term) @var"#,
+    var: Variable,
+);
+
+query!(
     SEARCH_FUNCTIONS,
     r#"
         [
@@ -203,6 +216,22 @@ pub fn clauses<'tree, I: AsRef<[u8]>>(
     text: impl TextProvider<I>,
 ) -> impl StreamingIterator<Item = (CLAUSES, Node<'tree>)> {
     CLAUSES_RAW(cursor, tree, text)
+}
+
+pub fn function_heads<'tree, I: AsRef<[u8]>>(
+    cursor: &'tree mut QueryCursor,
+    tree: Node<'tree>,
+    text: impl TextProvider<I>,
+) -> impl StreamingIterator<Item = Node<'tree>> {
+    FUNCTION_HEADS_RAW(cursor, tree, text).map(|&(FUNCTION_HEADS::Function, x)| x)
+}
+
+pub fn variables<'tree, I: AsRef<[u8]>>(
+    cursor: &'tree mut QueryCursor,
+    tree: Node<'tree>,
+    text: impl TextProvider<I>,
+) -> impl StreamingIterator<Item = Node<'tree>> {
+    VARIABLES_RAW(cursor, tree, text).map(|&(VARIABLES::Variable, x)| x)
 }
 
 pub fn search_functions<'tree>(

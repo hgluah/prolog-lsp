@@ -17,10 +17,15 @@ pub fn inlay_hints(range: Range, document: &Document) -> anyhow::Result<Option<V
             (&function.variables)
                 .into_iter()
                 .flat_map(|var| {
-                    function
-                        .head
-                        .get_path_for(&var.declaration)
-                        .map(|(range, _)| (var.domain.clone(), range))
+                    std::iter::chain(
+                        function
+                            .head
+                            .get_path_for(&var.declaration)
+                            .map(|(range, _)| (var.domain.clone(), range)),
+                        unsafe { function.body_variables.get(&var.declaration) }
+                            .iter()
+                            .map(|range| (var.domain.clone(), range.position)),
+                    )
                 })
                 .map(|(domain, range)| InlayHint {
                     position: range.end,
@@ -78,9 +83,7 @@ fn domain_to_label(
     }
     match &domain.kind {
         None => Either::Left(Cow::Borrowed("any")),
-        Some(kind) if kind.simple_kinds.is_empty() && kind.array_kind.is_none() => {
-            Either::Left(Cow::Borrowed("!"))
-        }
+        Some(kind) if kind.is_invalid() => Either::Left(Cow::Borrowed("!")),
         Some(kind) => std::iter::chain(
             (&kind.simple_kinds)
                 .into_iter()
@@ -88,7 +91,7 @@ fn domain_to_label(
                 .map(std::iter::once)
                 .map(Either::Left),
             kind.array_kind.as_ref().map(|(domain, emptyable)| {
-                if domain.is_ill_formed() {
+                if domain.is_invalid() {
                     Either::Left(std::iter::once(Either::Left(Cow::Borrowed(
                         if *emptyable { "[]" } else { "![]" },
                     ))))

@@ -7,6 +7,20 @@ use lsp_types::{
 
 use crate::lsp::document::{Argument, Document};
 
+/// Cow without ToOwned
+enum Ref<'a, T> {
+    Ref(&'a T),
+    Own(T),
+}
+impl<'a, T> Borrow<T> for Ref<'a, T> {
+    fn borrow(&self) -> &T {
+        match self {
+            Ref::Ref(x) => x,
+            Ref::Own(x) => x,
+        }
+    }
+}
+
 pub fn document_symbols(document: &Document) -> anyhow::Result<Option<DocumentSymbolResponse>> {
     let functions = &document.functions_and_facts;
     if functions.is_empty() {
@@ -20,7 +34,19 @@ pub fn document_symbols(document: &Document) -> anyhow::Result<Option<DocumentSy
             kind: SymbolKind::FUNCTION,
             range: function.position_including_body.into(),
             selection_range: function.head.name.position,
-            children: document_symbol_children(&function.head.parameters),
+            children: document_symbol_children(std::iter::chain(
+                function
+                    .head
+                    .parameters
+                    .iter()
+                    .map(Borrow::borrow)
+                    .map(Ref::Ref),
+                (&function.body_variables)
+                    .into_iter()
+                    .cloned()
+                    .map(Argument::Variable)
+                    .map(Ref::Own),
+            )),
             detail: None,
             tags: None,
             #[allow(deprecated)]
@@ -31,7 +57,9 @@ pub fn document_symbols(document: &Document) -> anyhow::Result<Option<DocumentSy
     Ok(Some(DocumentSymbolResponse::Nested(document_symbols)))
 }
 
-fn document_symbol_children(args: &[impl Borrow<Argument>]) -> Option<Vec<DocumentSymbol>> {
+fn document_symbol_children(
+    args: impl IntoIterator<Item = impl Borrow<Argument>>,
+) -> Option<Vec<DocumentSymbol>> {
     fn name(arg: &impl Borrow<Argument>) -> Cow<'_, str> {
         match arg.borrow() {
             Argument::Number(name)
@@ -48,46 +76,52 @@ fn document_symbol_children(args: &[impl Borrow<Argument>]) -> Option<Vec<Docume
         }
     }
     let res = args
-        .iter()
-        .map(Borrow::borrow)
-        .map(|arg| DocumentSymbol {
-            name: name(arg).into_owned(),
-            kind: match arg {
-                Argument::Number(_) => SymbolKind::NUMBER,
-                Argument::Atom(_) => SymbolKind::CONSTANT,
-                Argument::String(_) => SymbolKind::STRING,
-                Argument::Variable(_) => SymbolKind::VARIABLE,
-                Argument::List(_, _) => SymbolKind::ARRAY,
-                Argument::Function(_) => SymbolKind::FUNCTION,
-            },
-            range: match arg {
-                Argument::Number(name)
-                | Argument::Atom(name)
-                | Argument::String(name)
-                | Argument::Variable(name) => name.position,
-                Argument::List(_, position) => *position,
-                Argument::Function(function) => function.position_including_params.into(),
-            },
-            selection_range: match arg {
-                Argument::Number(name)
-                | Argument::Atom(name)
-                | Argument::String(name)
-                | Argument::Variable(name) => name.position,
-                Argument::List(_, position) => *position,
-                Argument::Function(function) => function.name.position,
-            },
-            children: match arg {
-                Argument::Number(_)
-                | Argument::Atom(_)
-                | Argument::String(_)
-                | Argument::Variable(_) => None,
-                Argument::List(args, _) => document_symbol_children(args),
-                Argument::Function(function) => document_symbol_children(&function.parameters),
-            },
-            detail: None,
-            tags: None,
-            #[allow(deprecated)]
-            deprecated: None,
+        .into_iter()
+        .map(|arg| {
+            let arg = arg.borrow();
+            DocumentSymbol {
+                name: name(arg).into_owned(),
+                kind: match arg {
+                    Argument::Number(_) => SymbolKind::NUMBER,
+                    Argument::Atom(_) => SymbolKind::CONSTANT,
+                    Argument::String(_) => SymbolKind::STRING,
+                    Argument::Variable(_) => SymbolKind::VARIABLE,
+                    Argument::List(_, _) => SymbolKind::ARRAY,
+                    Argument::Function(_) => SymbolKind::FUNCTION,
+                },
+                range: match arg {
+                    Argument::Number(name)
+                    | Argument::Atom(name)
+                    | Argument::String(name)
+                    | Argument::Variable(name) => name.position,
+                    Argument::List(_, position) => *position,
+                    Argument::Function(function) => function.position_including_params.into(),
+                },
+                selection_range: match arg {
+                    Argument::Number(name)
+                    | Argument::Atom(name)
+                    | Argument::String(name)
+                    | Argument::Variable(name) => name.position,
+                    Argument::List(_, position) => *position,
+                    Argument::Function(function) => function.name.position,
+                },
+                children: match arg {
+                    Argument::Number(_)
+                    | Argument::Atom(_)
+                    | Argument::String(_)
+                    | Argument::Variable(_) => None,
+                    Argument::List(args, _) => {
+                        document_symbol_children(args.iter().map(Borrow::borrow))
+                    }
+                    Argument::Function(function) => {
+                        document_symbol_children(function.parameters.iter().map(Borrow::borrow))
+                    }
+                },
+                detail: None,
+                tags: None,
+                #[allow(deprecated)]
+                deprecated: None,
+            }
         })
         .collect::<Vec<_>>();
     (!res.is_empty()).then_some(res)
