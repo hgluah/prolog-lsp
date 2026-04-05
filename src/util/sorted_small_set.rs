@@ -1,5 +1,9 @@
 use core::{cmp::Ordering, fmt, marker::PhantomData};
-use std::{iter::Peekable, mem::MaybeUninit, ops::RangeBounds};
+use std::{
+    iter::Peekable,
+    mem::MaybeUninit,
+    ops::{Range, RangeBounds},
+};
 
 use smallvec::{Array, SmallVec};
 use sorted_iter::{
@@ -12,8 +16,11 @@ macro_rules! sss_handler {
         |$x:pat_param| $key_expr:expr
         $(, |$old:pat_param, $new:pat_param| $reduce_expr:expr)? $(,)?
     ) => {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-        $vis struct $ty;
+        $crate::util::sorted_small_set::ssv_handler!(
+            <($($generic)*)> $vis $ty<$T>
+            Key = $Key;
+            |$x| $key_expr
+        );
         impl<$($generic)*> $crate::util::sorted_small_set::SSSHandler<$T> for $ty {
             type Key = $Key;
             fn key($x: &$T) -> &Self::Key {
@@ -27,7 +34,24 @@ macro_rules! sss_handler {
         }
     };
 }
+macro_rules! ssv_handler {
+    (
+        <($($generic:tt)*)> $vis:vis $ty:ident<$T:ty>
+        Key = $Key:ty;
+        |$x:pat_param| $key_expr:expr
+    ) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+        $vis struct $ty;
+        impl<$($generic)*> $crate::util::sorted_small_set::SSVHandler<$T> for $ty {
+            type Key = $Key;
+            fn key($x: &$T) -> &Self::Key {
+                $key_expr
+            }
+        }
+    };
+}
 pub(crate) use sss_handler;
+pub(crate) use ssv_handler;
 pub trait SSSHandler<T> {
     type Key: ?Sized + Ord;
     fn key(x: &T) -> &Self::Key;
@@ -35,6 +59,10 @@ pub trait SSSHandler<T> {
         debug_assert!(Self::key(old) == Self::key(&new));
         *old = new;
     }
+}
+pub trait SSVHandler<T> {
+    type Key: ?Sized + Ord;
+    fn key(x: &T) -> &Self::Key;
 }
 // See [`std::convert::identity`]
 sss_handler!(<(T: Ord)> pub Noop<T> Key = T; |x| x);
@@ -117,17 +145,30 @@ pub struct SortedSmallSet<T, const N: usize, Handler: SSSHandler<T> = Noop>(
     PhantomData<Handler>,
 );
 
-macro_rules! impl_sorted_small_set {
+pub struct SortedSmallVec<T, const N: usize, Handler: SSVHandler<T> = Noop>(
+    SmallVec<[T; N]>,
+    PhantomData<Handler>,
+);
+
+macro_rules! impl_sorted_small {
     ($(@$lifetime:lifetime [$($reference:tt)*])? $($trait:ty)? $(where [$($where_clauses:tt)+])? { $($implementation:tt)* }) => {
-        impl<$($lifetime,)? T, const N: usize, Handler: SSSHandler<T>>
-        $($trait for)? $($($reference)*)? SortedSmallSet<T, N, Handler>
+        impl_sorted_small!(
+            $(@$lifetime [$($reference)*])? $($trait)? > SortedSmallSet SSSHandler $(where [$($where_clauses)+])? { $($implementation)* }
+        );
+        impl_sorted_small!(
+            $(@$lifetime [$($reference)*])? $($trait)? > SortedSmallVec SSVHandler $(where [$($where_clauses)+])? { $($implementation)* }
+        );
+    };
+    ($(@$lifetime:lifetime [$($reference:tt)*])? $($trait:ty)? > $SS:ident $SSHandler:ident $(where [$($where_clauses:tt)+])? { $($implementation:tt)* }) => {
+        impl<$($lifetime,)? T, const N: usize, Handler: $SSHandler<T>>
+        $($trait for)? $($($reference)*)? $SS<T, N, Handler>
             $(where $($where_clauses)+)?
         {
             $($implementation)*
         }
     };
     (into_iter@ $($lifetime:lifetime $($mut:ident)?)? @ $iter:ty) => {
-        impl_sorted_small_set!($(@$lifetime [&$lifetime$($mut)?])? IntoIterator {
+        impl_sorted_small!($(@$lifetime [&$lifetime$($mut)?])? IntoIterator {
             type Item = $(&$lifetime $($mut)?)? T;
 
             type IntoIter = AssumeSortedByItem<$iter>;
@@ -139,12 +180,12 @@ macro_rules! impl_sorted_small_set {
     };
 }
 
-impl_sorted_small_set!(Default {
+impl_sorted_small!(Default {
     fn default() -> Self {
         Self::empty()
     }
 });
-impl_sorted_small_set!(PartialEq {
+impl_sorted_small!(PartialEq {
     fn eq(&self, other: &Self) -> bool {
         Iterator::eq(
             self.into_iter().map(Handler::key),
@@ -152,7 +193,7 @@ impl_sorted_small_set!(PartialEq {
         )
     }
 });
-impl_sorted_small_set!(Ord {
+impl_sorted_small!(Ord {
     fn cmp(&self, other: &Self) -> Ordering {
         Iterator::cmp(
             self.into_iter().map(Handler::key),
@@ -160,23 +201,23 @@ impl_sorted_small_set!(Ord {
         )
     }
 });
-impl_sorted_small_set!(Eq {});
-impl_sorted_small_set!(PartialOrd {
+impl_sorted_small!(Eq {});
+impl_sorted_small!(PartialOrd {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 });
-impl_sorted_small_set!(Clone where [T: Clone] {
+impl_sorted_small!(Clone where [T: Clone] {
     fn clone(&self) -> Self {
         Self(self.0.clone(), PhantomData)
     }
 });
-impl_sorted_small_set!(fmt::Debug where [T: fmt::Debug] {
+impl_sorted_small!(fmt::Debug where [T: fmt::Debug] {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_set().entries(&self.0).finish()
     }
 });
-impl_sorted_small_set!(FromIterator<T> {
+impl_sorted_small!(FromIterator<T> > SortedSmallSet SSSHandler {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
         let mut res = iter.into_iter().collect::<SmallVec<_>>();
         res.sort_unstable_by(|a, b| Ord::cmp(Handler::key(a), Handler::key(b)));
@@ -185,7 +226,7 @@ impl_sorted_small_set!(FromIterator<T> {
             for idx in (0..=prev_last_idx).rev() {
                 if Handler::key(unsafe { res.get_unchecked(idx) })
                     == Handler::key(unsafe { res.get_unchecked(idx.unchecked_add(1)) }) {
-                    let last = unsafe { res.pop().unwrap_unchecked() };
+                    let last = unsafe { res.remove(idx.unchecked_add(1)) };
                     Handler::reduce(unsafe { res.get_unchecked_mut(idx) }, last);
                 }
             }
@@ -194,11 +235,18 @@ impl_sorted_small_set!(FromIterator<T> {
         Self(res, PhantomData)
     }
 });
-impl_sorted_small_set!(into_iter@ @ smallvec::IntoIter<[T; N]>);
-impl_sorted_small_set!(into_iter@ 'a @ std::slice::Iter<'a, T>);
-impl_sorted_small_set!(into_iter@ 'a mut @ std::slice::IterMut<'a, T>);
+impl_sorted_small!(FromIterator<T> > SortedSmallVec SSVHandler {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        let mut res = iter.into_iter().collect::<SmallVec<_>>();
+        res.sort_unstable_by(|a, b| Ord::cmp(Handler::key(a), Handler::key(b)));
+        Self(res, PhantomData)
+    }
+});
+impl_sorted_small!(into_iter@ @ smallvec::IntoIter<[T; N]>);
+impl_sorted_small!(into_iter@ 'a @ std::slice::Iter<'a, T>);
+impl_sorted_small!(into_iter@ 'a mut @ std::slice::IterMut<'a, T>);
 
-impl_sorted_small_set!({
+impl_sorted_small!({
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
@@ -207,6 +255,7 @@ impl_sorted_small_set!({
     pub fn len(&self) -> usize {
         self.0.len()
     }
+
     /// SAFETY: The caller cannot modify data that modifies the order of the elements
     #[inline]
     pub unsafe fn as_slice(&self) -> &[T] {
@@ -217,6 +266,7 @@ impl_sorted_small_set!({
     pub unsafe fn as_mut_slice(&mut self) -> &mut [T] {
         &mut self.0
     }
+
     #[inline]
     pub fn clear(&mut self) {
         self.0.clear()
@@ -225,7 +275,52 @@ impl_sorted_small_set!({
     pub fn pop(&mut self) -> Option<T> {
         self.0.pop()
     }
+    #[inline]
+    pub fn drain(&mut self, range: impl RangeBounds<usize>) -> smallvec::Drain<'_, [T; N]> {
+        self.0.drain(range)
+    }
 
+    #[inline]
+    pub const fn empty() -> Self {
+        Self(SmallVec::new_const(), PhantomData)
+    }
+    #[inline]
+    pub fn single(item: T) -> Self {
+        const { assert!(N > 0) };
+        let mut arr = const { MaybeUninit::uninit().transpose() };
+        arr[0] = MaybeUninit::new(item);
+        Self(
+            unsafe { SmallVec::from_buf_and_len_unchecked(arr.transpose(), 1) },
+            PhantomData,
+        )
+    }
+});
+impl_sorted_small!(> SortedSmallVec SSVHandler {
+    pub fn get_range(&self, item: &Handler::Key) -> Range<usize> {
+        self.0.partition_point(|x| Handler::key(x) < item)..self.0.partition_point(|x| Handler::key(x) <= item)
+    }
+    /// SAFETY: The caller cannot modify data that modifies the order of the elements
+    #[inline]
+    pub unsafe fn get(&self, item: &Handler::Key) -> &[T] {
+        unsafe { self.0.get_unchecked(self.get_range(item)) }
+    }
+    /// SAFETY: The caller cannot modify data that modifies the order of the elements
+    #[inline]
+    pub unsafe fn get_mut(&mut self, item: &Handler::Key) -> &mut [T] {
+        let idx = self.get_range(item);
+        unsafe { self.0.get_unchecked_mut(idx) }
+    }
+
+    /// SAFETY: The caller cannot modify data that modifies the order of the elements
+    #[inline]
+    pub unsafe fn push(&mut self, item: T) -> &mut T {
+        let key = Handler::key(&item);
+        let idx = self.0.partition_point(|x| Handler::key(x) <= key);
+        self.0.insert(idx, item);
+        unsafe { self.0.get_unchecked_mut(idx) }
+    }
+});
+impl_sorted_small!(> SortedSmallSet SSSHandler {
     /// SAFETY: The caller cannot modify data that modifies the order of the elements
     #[inline]
     pub unsafe fn get(&self, item: &Handler::Key) -> Option<&T> {
@@ -248,24 +343,6 @@ impl_sorted_small_set!({
     pub fn entry<'a>(&'a mut self, item: &Handler::Key) -> SSSEntry<'a, [T; N], Handler> {
         let idx = self.0.binary_search_by_key(&item, Handler::key);
         SSSEntry(&mut self.0, idx, PhantomData)
-    }
-
-    #[inline]
-    pub fn drain(&mut self, range: impl RangeBounds<usize>) -> smallvec::Drain<'_, [T; N]> {
-        self.0.drain(range)
-    }
-
-    pub const fn empty() -> Self {
-        Self(SmallVec::new_const(), PhantomData)
-    }
-    pub fn single(item: T) -> Self {
-        const { assert!(N > 0) };
-        let mut arr = const { MaybeUninit::uninit().transpose() };
-        arr[0] = MaybeUninit::new(item);
-        Self(
-            unsafe { SmallVec::from_buf_and_len_unchecked(arr.transpose(), 1) },
-            PhantomData,
-        )
     }
 
     /// SAFETY: both [`SortedIterator`] are correctly implemented

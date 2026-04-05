@@ -15,6 +15,7 @@ module.exports = {
         command,
         options: {
           env: {
+            RUST_BACKTRACE: "1",
             RUST_LOG: "INFO",
           },
         },
@@ -24,6 +25,7 @@ module.exports = {
         args: [],
         options: {
           env: {
+            RUST_BACKTRACE: "1",
             RUST_LOG: "INFO",
           },
         },

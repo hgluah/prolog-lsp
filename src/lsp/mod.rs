@@ -21,7 +21,7 @@ use lsp_types::{
         SemanticTokensRangeRequest,
     },
 };
-use tracing::warn;
+use tracing::{error, warn};
 use tree_sitter::Parser;
 
 use crate::{
@@ -44,19 +44,26 @@ pub fn main_loop(text_fn: TextFn, con: Connection) -> anyhow::Result<()> {
     let mut docs = Documents::default();
 
     for msg in con.receiver {
-        match msg {
-            Message::Notification(noti) => {
-                if let Some(iter) = handle_notification(&mut docs, &mut parser, text_fn, noti)? {
-                    iter.map(Message::Notification)
-                        .try_for_each(|response| con.sender.send(response))?;
+        let handle_msg = || {
+            anyhow::Result::<()>::Ok(match msg {
+                Message::Notification(noti) => {
+                    if let Some(iter) = handle_notification(&mut docs, &mut parser, text_fn, noti)?
+                    {
+                        iter.map(Message::Notification)
+                            .try_for_each(|response| con.sender.send(response))?;
+                    }
                 }
-            }
-            Message::Request(req) => {
-                let response = Message::Response(handle_request(&mut docs, &mut parser, req)?);
-                con.sender.send(response)?;
-            }
-            Message::Response(_) => unreachable!(),
+                Message::Request(req) => {
+                    let response = Message::Response(handle_request(&mut docs, &mut parser, req)?);
+                    con.sender.send(response)?;
+                }
+                Message::Response(_) => unreachable!(),
+            })
         };
+        if let Err(err) = handle_msg() {
+            let err = err.into_boxed_dyn_error();
+            error!(err);
+        }
     }
 
     Ok(())
