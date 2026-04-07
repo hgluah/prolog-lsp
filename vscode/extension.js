@@ -46,6 +46,19 @@ module.exports = {
       clientOptions,
     );
 
+    client.onRequest("custom/getContentsOfDoc", async (params) => {
+      const uri = params.uri;
+
+      return (
+        vscode.workspace.textDocuments
+          .find((doc) => doc.uri.toString() === uri)
+          ?.getText() ??
+        Buffer.from(
+          await vscode.workspace.fs.readFile(vscode.Uri.parse(uri)),
+        ).toString("utf8")
+      );
+    });
+
     log.appendLine("Starting Prolog LSP...");
     client.start();
   },

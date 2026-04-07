@@ -3,6 +3,7 @@
 #![feature(maybe_uninit_uninit_array_transpose)]
 #![feature(formatting_options)]
 #![feature(iter_intersperse)]
+#![feature(impl_trait_in_bindings)]
 
 mod init;
 mod lsp;

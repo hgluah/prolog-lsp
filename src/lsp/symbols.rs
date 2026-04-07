@@ -44,6 +44,7 @@ pub fn document_symbols(document: &Document) -> anyhow::Result<Option<DocumentSy
                 (&function.body_variables)
                     .into_iter()
                     .cloned()
+                    .map(|x| x.into())
                     .map(Argument::Variable)
                     .map(Ref::Own),
             )),

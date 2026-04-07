@@ -22,10 +22,6 @@ macro_rules! sss_handler {
             |$x| $key_expr
         );
         impl<$($generic)*> $crate::util::sorted_small_set::SSSHandler<$T> for $ty {
-            type Key = $Key;
-            fn key($x: &$T) -> &Self::Key {
-                $key_expr
-            }
             $(
                 fn reduce($old: &mut $T, $new: $T) {
                     $reduce_expr
@@ -52,14 +48,14 @@ macro_rules! ssv_handler {
 }
 pub(crate) use sss_handler;
 pub(crate) use ssv_handler;
-pub trait SSSHandler<T> {
-    type Key: ?Sized + Ord;
-    fn key(x: &T) -> &Self::Key;
+pub trait SSSHandler<T>: SSVHandler<T> {
     fn reduce(old: &mut T, new: T) {
         debug_assert!(Self::key(old) == Self::key(&new));
         *old = new;
     }
 }
+/// For a given element, [`Self::key`] should always return the same result.\
+/// This should be an unsafe trait but idgaf.
 pub trait SSVHandler<T> {
     type Key: ?Sized + Ord;
     fn key(x: &T) -> &Self::Key;
@@ -217,29 +213,42 @@ impl_sorted_small!(fmt::Debug where [T: fmt::Debug] {
         f.debug_set().entries(&self.0).finish()
     }
 });
-impl_sorted_small!(FromIterator<T> > SortedSmallSet SSSHandler {
+impl_sorted_small!(FromIterator<T> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        let mut res = iter.into_iter().collect::<SmallVec<_>>();
+        let mut res = Self::empty();
+        res.extend(iter);
+        res
+    }
+});
+impl_sorted_small!(Extend<T> > SortedSmallSet SSSHandler {
+    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        let res = &mut self.0;
+        res.extend(iter);
+        // TODO Maybe we can just sort the part that's new and then merge. Same thing of the other `fn extend`
         res.sort_unstable_by(|a, b| Ord::cmp(Handler::key(a), Handler::key(b)));
 
         if let Some(prev_last_idx) = res.len().checked_sub(2) {
             for idx in (0..=prev_last_idx).rev() {
                 if Handler::key(unsafe { res.get_unchecked(idx) })
                     == Handler::key(unsafe { res.get_unchecked(idx.unchecked_add(1)) }) {
-                    let last = unsafe { res.remove(idx.unchecked_add(1)) };
-                    Handler::reduce(unsafe { res.get_unchecked_mut(idx) }, last);
+                        let last = unsafe { res.remove(idx.unchecked_add(1)) };
+                        Handler::reduce(unsafe { res.get_unchecked_mut(idx) }, last);
                 }
             }
         }
-
-        Self(res, PhantomData)
     }
 });
-impl_sorted_small!(FromIterator<T> > SortedSmallVec SSVHandler {
-    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        let mut res = iter.into_iter().collect::<SmallVec<_>>();
+impl_sorted_small!(Extend<T> > SortedSmallVec SSVHandler {
+    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        let res = &mut self.0;
+        res.extend(iter);
+        // TODO Maybe we can just sort the part that's new and then merge. Same thing of the other `fn extend`
         res.sort_unstable_by(|a, b| Ord::cmp(Handler::key(a), Handler::key(b)));
-        Self(res, PhantomData)
+    }
+});
+impl_sorted_small!(Into<SmallVec<[T; N]>> {
+    fn into(self) -> SmallVec<[T; N]> {
+        self.0
     }
 });
 impl_sorted_small!(into_iter@ @ smallvec::IntoIter<[T; N]>);
@@ -274,6 +283,10 @@ impl_sorted_small!({
     #[inline]
     pub fn pop(&mut self) -> Option<T> {
         self.0.pop()
+    }
+    #[inline]
+    pub fn remove(&mut self, idx: usize) -> T {
+        self.0.remove(idx)
     }
     #[inline]
     pub fn drain(&mut self, range: impl RangeBounds<usize>) -> smallvec::Drain<'_, [T; N]> {
@@ -311,9 +324,8 @@ impl_sorted_small!(> SortedSmallVec SSVHandler {
         unsafe { self.0.get_unchecked_mut(idx) }
     }
 
-    /// SAFETY: The caller cannot modify data that modifies the order of the elements
     #[inline]
-    pub unsafe fn push(&mut self, item: T) -> &mut T {
+    pub fn push(&mut self, item: T) -> &mut T {
         let key = Handler::key(&item);
         let idx = self.0.partition_point(|x| Handler::key(x) <= key);
         self.0.insert(idx, item);
@@ -321,11 +333,14 @@ impl_sorted_small!(> SortedSmallVec SSVHandler {
     }
 });
 impl_sorted_small!(> SortedSmallSet SSSHandler {
+    pub fn get_index(&self, item: &Handler::Key) -> Result<usize, usize> {
+        self.0.binary_search_by_key(&item, Handler::key)
+    }
+
     /// SAFETY: The caller cannot modify data that modifies the order of the elements
     #[inline]
     pub unsafe fn get(&self, item: &Handler::Key) -> Option<&T> {
-        self.0
-            .binary_search_by_key(&item, Handler::key)
+        self.get_index(&item)
             .ok()
             .map(|idx| unsafe { self.0.get_unchecked(idx) })
     }
@@ -334,14 +349,13 @@ impl_sorted_small!(> SortedSmallSet SSSHandler {
     pub unsafe fn get_mut(&mut self, item: &Handler::Key) -> Option<&mut T> {
         unsafe { self.entry(item).get() }
     }
-    /// SAFETY: The caller cannot modify data that modifies the order of the elements
     #[inline]
-    pub unsafe fn push(&mut self, item: T) -> &mut T {
+    pub fn push(&mut self, item: T) -> &mut T {
         unsafe { self.entry(Handler::key(&item)).insert(item) }
     }
     #[inline]
     pub fn entry<'a>(&'a mut self, item: &Handler::Key) -> SSSEntry<'a, [T; N], Handler> {
-        let idx = self.0.binary_search_by_key(&item, Handler::key);
+        let idx = self.get_index(&item);
         SSSEntry(&mut self.0, idx, PhantomData)
     }
 

@@ -21,7 +21,7 @@ use crate::{
     lsp::queries::{self, Ancestors, clauses, function_heads, module},
     util::{
         formatting::NoAlternate,
-        sorted_small_set::{SortedSmallSet, SortedSmallVec, sss_handler, ssv_handler},
+        sorted_small_set::{SSVHandler, SortedSmallSet, SortedSmallVec, sss_handler, ssv_handler},
     },
 };
 
@@ -85,7 +85,7 @@ impl Document {
 
         let mut cursor_1 = QueryCursor::new();
         let mut cursor_2 = QueryCursor::new();
-        let mut unprocessed_functions = clauses(
+        let unprocessed_functions = clauses(
             &mut cursor_1,
             self.tree.root_node(),
             self.text.text.as_bytes(),
@@ -121,21 +121,23 @@ impl Document {
                                 variables: SortedSmallSet::empty(),
                                 body_variables: SortedSmallVec::empty(),
                             };
-                            unsafe { self.functions_and_facts.push(item) };
+                            self.functions_and_facts.push(item);
                             return Ok(None);
                         }
                         (node, None)
                     }
-                    CLAUSES::Op => if is_valid_opfun(node) {
-                        // TODO Everywhere where i use .child(n) is wrong, since there might be children from the "extra" category, such as a comment
-                        //      Same thing goes for child_count()
-                        (node.child(0).unwrap(), Some(node.child(2).unwrap()))
-                    } else {
-                        break 'err;
+                    CLAUSES::Op => {
+                        if is_valid_opfun(node) {
+                            // TODO Everywhere where i use .child(n) is wrong, since there might be children from the "extra" category, such as a comment
+                            //      Same thing goes for child_count()
+                            (node.child(0).unwrap(), Some(node.child(2).unwrap()))
+                        } else {
+                            break 'err;
+                        }
                     }
                 };
 
-                let function = FunctionOrFact {
+                let mut function = FunctionOrFact {
                     head: Self::parse_funtion_head(function, &self.text.text)?,
                     position_including_body: MiniNode::pos(node).into(),
                     variables: SortedSmallSet::empty(),
@@ -155,9 +157,8 @@ impl Document {
 
                             queries::variables(&mut cursor_2, body, self.text.text.as_bytes())
                                 .copied()
-                                .map(|node| MiniNode::new(node, &self.text.text))
-                                .collect::<Result<_, _>>()
-                        )
+                                .map(|node| MiniNode::new(node, &self.text.text).map(Into::into))
+                                .collect::<Result<_, _>>())
                         .transpose()?
                         .unwrap_or_default(),
                 };
@@ -178,17 +179,13 @@ impl Document {
                     }
                 );
                 fn variables(
-                    res: &mut SortedSmallSet<
-                        UnprocessedVariable,
-                        4,
-                        UnprocessedVariablesGroupper,
-                    >,
+                    res: &mut SortedSmallSet<UnprocessedVariable, 4, UnprocessedVariablesGroupper>,
                     arg: &Argument<impl Deref<Target = FunctionHeadOrFact>>,
                     nested_path: &mut SmallVec<[SingleFunctionOrArrayCall; 6]>,
                 ) {
                     match arg {
                         Argument::Number(_) | Argument::Atom(_) | Argument::String(_) => (),
-                        Argument::Variable(var) => unsafe {
+                        Argument::Variable(var) => {
                             res.push(UnprocessedVariable {
                                 declaration: var.text.clone(),
                                 domain_all_of: smallvec![VariableUsage::NestedCall(
@@ -196,7 +193,7 @@ impl Document {
                                 )],
                                 defined_starting_from_point: None,
                             });
-                        },
+                        }
                         Argument::List(args, _) => {
                             args.iter().enumerate().for_each(|(param_idx, arg)| {
                                 nested_path.push(SingleFunctionOrArrayCall {
@@ -208,181 +205,73 @@ impl Document {
                             });
                         }
                         Argument::Function(function) => {
-                            function.parameters.iter().enumerate().for_each(
-                                |(param_idx, arg)| {
+                            function
+                                .parameters
+                                .iter()
+                                .enumerate()
+                                .for_each(|(param_idx, arg)| {
                                     nested_path.push(SingleFunctionOrArrayCall {
                                         function: Some(function.name.clone().into()),
                                         param_idx,
                                     });
                                     variables(res, arg, nested_path);
                                     nested_path.pop();
-                                },
-                            );
+                                });
                         }
                     }
                 }
                 let nested_path = &mut SmallVec::new_const();
-                let mut unprocessed_params = SortedSmallSet::empty();
-                variables(&mut unprocessed_params, &Argument::Function(&function.head), nested_path);
-                (&mut unprocessed_params)
-                    .into_iter()
-                    .for_each(|var| {
+                let mut unprocessed_vars = SortedSmallSet::empty();
+                {
+                    variables(
+                        &mut unprocessed_vars,
+                        &Argument::Function(&function.head),
+                        nested_path,
+                    );
+                    // Variables in the head should never reference other functions,
+                    // hence why we clear them so that their only purpose is to be computed as "any"
+                    // if they don't do much more in the body
+                    // TODO aren't those basically "Singleton Variable"s?
+                    (&mut unprocessed_vars).into_iter().for_each(|var| {
                         var.defined_starting_from_point = None;
                         var.domain_all_of.clear();
                     });
+                }
                 if let Some(body) = body {
                     function_heads(&mut cursor_2, body, self.text.text.as_bytes())
                         .copied()
                         .map(|function| Self::parse_funtion_head(function, &self.text.text))
-                        .try_for_each(|function| function.map(|function|
-                            variables(&mut unprocessed_params, &Argument::Function(&function), nested_path
-                        )))?;
-                }
-
-                return Ok(
-                    if unprocessed_params.is_empty() {
-                        unsafe { self.functions_and_facts.push(function) };
-                        None
-                    } else {
-                        Some((function.head.name.text.clone(), (function, unprocessed_params)))
-                    }
-                );
-            }
-            todo!("{node:#}") // TODO
-        })
-        .filter_map_ok(std::convert::identity)
-        .map_ok(|(k, v)| (k, smallvec![v]))
-        .collect::<anyhow::Result<SortedSmallSet<(_, SmallVec<[_; 4]>), 4, UnprocessedFunctionsHandler>>>()?;
-        sss_handler!(
-            <(T, const N: usize)>
-            UnprocessedFunctionsHandler<(Rc<String>, SmallVec<[T; N]>)> Key = str;
-            |x| &x.0,
-            |old, mut new| {
-                debug_assert_eq!(old.0, new.0);
-                old.1.append(&mut new.1);
-            }
-        );
-
-        while let Some((mut function, mut unprocessed_params)) = 'next_to_be_processed: {
-            while let Some((_, v)) = unsafe { unprocessed_functions.as_mut_slice() }.last_mut() {
-                if let Some(res) = v.pop() {
-                    break 'next_to_be_processed Some(res);
-                }
-                unsafe { unprocessed_functions.pop().unwrap_unchecked() };
-            }
-            None
-        } {
-            for caller_var in unprocessed_params.drain(..) {
-                let domain = caller_var
-                    .domain_all_of
-                    .into_iter()
-                    .map(|usage| match usage {
-                        VariableUsage::ArithIs => VariableDomain::NUMBER.with(Rc::clone),
-                        // VariableUsage::PatternMatchEq(res) => todo!(),
-                        VariableUsage::NestedCall(nested) => nested
-                            .iter()
-                            .position(|first_nested| first_nested.function.is_some()) // If there is no function call (e.g. [X|Tail]), then it's "Any"
-                            .map(|first_nested| {
-                                let nested = unsafe { nested.get_unchecked(first_nested..) };
-                                let first_nested = &unsafe {
-                                    nested
-                                        .get_unchecked(0)
-                                        .function
-                                        .as_ref()
-                                        .unwrap_unchecked()
-                                }
-                                .text;
-                                let domain_any_of = std::iter::chain(
-                                    std::iter::chain(
-                                        unsafe { self.functions_and_facts.get(first_nested) }.iter().map(|function| (function, const { &SortedSmallSet::empty() })),
-                                        unsafe { unprocessed_functions.get(first_nested) }.into_iter().flat_map(|(_, functions)| functions.into_iter().map(|(a, b)| (a, b)))
-                                    ),
-                                    None, // TODO Add imported functions
-                                );
-                                // TODO If there are no functions that match the given name, that should be a hard error, which it kind of is since it will be converted to !, but it should be more explicit as to why
-                                let domain_any_of = domain_any_of
-                                    .filter_map(|(callee, callees_unprocessed_params)|
-                                        // TODO If there's test(X,Y):-... and test(X,Y,Z):-..., then example(test(X,Y)):-... would try to get info about both, even though it shouldn't.
-                                        //   It isn't really a big problem since that is a warning anyway
-                                        //   This applies to all callers of `get_param_at`, since we just filter_map on outputs known to be invalid, but not on those that seem possible bc we didn't check the arity
-                                        callee.head.get_param_at(nested)
-                                            .map(|callee_param| (callee_param, callee, callees_unprocessed_params))
-                                    );
-                                let domain_any_of = domain_any_of
-                                    .map(|(callee_param, callee, callees_unprocessed_params)| {
-                                        VariableDomain::from_argument(callee_param, |callee_var| {
-                                            // At this point, we have a callee_var, so we have to convert it to a caller_var
-                                            let callee_ctx_res = match unsafe { callee.variables.get(&&**callee_var) } {
-                                                Some(var) => var.domain.clone(),
-                                                None => {
-                                                    // TODO This var is still unprocessed...
-                                                    todo!("something with {callees_unprocessed_params:?}")
-                                                }
-                                            };
-                                            let caller_ctx_res = std::iter::chain(
-                                                    callee.head.get_path_for(callee_var)
-                                                        .filter_map(|(_, path)| function.head.get_param_at(path)),
-                                                    (&callee_ctx_res.references_variables)
-                                                        .into_iter()
-                                                        .flat_map(|other_param_of_callee|
-                                                            callee.head.get_path_for(other_param_of_callee)
-                                                                .filter_map(|(_, path)| function.head.get_param_at(path))
-                                                        )
-                                                )
-                                                .map(|caller_param| VariableDomain::from_argument(caller_param, |new_caller_var| {
-                                                    // At this point, we already have a caller_var, so we don't need to convert it from a callee_var as before
-                                                    if &**new_caller_var == &*caller_var.declaration {
-                                                        // TODO does this make sense?
-                                                        VariableDomain::ANY.with(Rc::clone)
-                                                    } else {
-                                                        let new_caller_var_domain = match unsafe { function.variables.get(&&**new_caller_var) } {
-                                                            Some(var) => var.domain.clone(),
-                                                            None => {
-                                                                // TODO This var is still unprocessed...
-                                                                todo!("something with {callees_unprocessed_params:?}")
-                                                            }
-                                                        };
-                                                        let res = VariableDomain {
-                                                            kind: new_caller_var_domain.kind.clone(),
-                                                            references_variables: unsafe { SortedSmallSet::union_iters(
-                                                                (&new_caller_var_domain.references_variables).into_iter().cloned(),
-                                                                Some(new_caller_var.text.clone())
-                                                            ) },
-                                                        };
-                                                        if res == *new_caller_var_domain {
-                                                            new_caller_var_domain
-                                                        } else {
-                                                            Rc::new(res)
-                                                        }
-                                                    }
-                                                }))
-                                                .collect::<VariableDomainCollector<{ ReductionKind::Intersection }>>().0;
-                                            VariableDomainCollector::<{ ReductionKind::Intersection }>::reduce(
-                                                caller_ctx_res,
-                                                VariableDomain {
-                                                    kind: callee_ctx_res.kind.clone(),
-                                                    references_variables: SortedSmallSet::empty(),
-                                                },
-                                            )
-                                        })
-                                    });
-                                domain_any_of
-                                    .collect::<VariableDomainCollector<{ ReductionKind::Union }>>().0
+                        .try_for_each(|function| {
+                            function.map(|function| {
+                                variables(
+                                    &mut unprocessed_vars,
+                                    &Argument::Function(&function),
+                                    nested_path,
+                                )
                             })
-                            .unwrap_or(VariableDomain::ANY.with(Rc::clone))
-                    })
-                    .collect::<VariableDomainCollector<{ ReductionKind::Intersection }>>().0;
+                        })?;
+                }
+                if let Ok(idx) = unprocessed_vars.get_index("_") {
+                    unprocessed_vars.remove(idx);
+                }
+                function
+                    .body_variables
+                    .drain(function.body_variables.get_range("_"));
 
-                unsafe {
-                    function.variables.push(Variable {
-                        declaration: caller_var.declaration,
-                        domain,
-                        defined_starting_from_point: caller_var.defined_starting_from_point,
-                    })
-                };
+                return Ok(if unprocessed_vars.is_empty() {
+                    self.functions_and_facts.push(function);
+                    None
+                } else {
+                    Some((function, unprocessed_vars))
+                });
             }
-            unsafe { self.functions_and_facts.push(function) };
-        }
+            bail!("{node:#}") // TODO
+        })
+        .filter_map_ok(|x| x.map(|(a, b)| (a, b.into())))
+        .collect::<anyhow::Result<SortedSmallVec<_, _, FuncTupleToName>>>()?;
+        ssv_handler!(<(T)> FuncTupleToName<(FunctionOrFact, T)> Key = str; |x| &x.0.head.name);
+
+        self.process_variables(unprocessed_functions)?;
 
         info!("{self:#?}");
 
@@ -409,7 +298,7 @@ impl Document {
                 MiniNode::pos(node),
             ),
             "functional_notation" => Function(Box::new(Self::parse_funtion_head(node, text)?)),
-            _ => return Err(todo!()), // TODO
+            _ => bail!("{node:#}"), // TODO
         })
     }
 
@@ -450,6 +339,207 @@ impl Document {
                 res
             },
         })
+    }
+
+    fn process_variables(
+        &mut self,
+        mut unprocessed_functions: SortedSmallVec<
+            (FunctionOrFact, SmallVec<[UnprocessedVariable; 4]>),
+            4,
+            impl SSVHandler<(FunctionOrFact, SmallVec<[UnprocessedVariable; 4]>), Key = str>,
+        >,
+    ) -> anyhow::Result<()> {
+        let mut failed_functions = SmallVec::<[_; 8]>::new_const();
+        let mut failed_params = SmallVec::<[_; 8]>::new_const();
+        while let Some((mut function, mut unprocessed_params)) = unprocessed_functions.pop() {
+            while let Some(caller_var) = unprocessed_params.pop() {
+                if failed_params.contains(&caller_var.declaration) {
+                    unprocessed_params.push(caller_var);
+                    break;
+                }
+
+                let domain = self.process_variable(
+                    &function,
+                    &unprocessed_functions,
+                    &failed_functions,
+                    &caller_var,
+                );
+
+                match domain {
+                    Ok(domain) => {
+                        if let Some(idx) = failed_params
+                            .iter()
+                            .position(|x| *x == caller_var.declaration)
+                        {
+                            failed_params.swap_remove(idx);
+                        }
+                        function.variables.push(Variable {
+                            declaration: caller_var.declaration,
+                            domain,
+                            defined_starting_from_point: caller_var.defined_starting_from_point,
+                        });
+                    }
+                    Err(()) => {
+                        failed_params.push(caller_var.declaration.clone());
+                        unprocessed_params.insert(0, caller_var);
+                    }
+                }
+            }
+
+            if failed_params.is_empty() {
+                if let Some(idx) = failed_functions.iter().position(|(f, _)|
+                    // It's very important to match this agains MiniNode and not str,
+                    // since there may be multiple functions with the same naem
+                    MiniNode::eq(&f.head.name, &function.head.name))
+                {
+                    failed_functions.swap_remove(idx);
+                }
+                self.functions_and_facts.push(function);
+            } else {
+                // TODO sure, this handles cycles, but doesn't give the function any other oportunity...+
+                failed_functions.push((function, unprocessed_params));
+                failed_params.clear();
+            }
+        }
+        self.functions_and_facts
+            .extend(failed_functions.into_iter().map(|(mut f, vars)| {
+                vars.into_iter().for_each(|var| {
+                    f.variables.push(Variable {
+                        declaration: var.declaration,
+                        domain: VariableDomain::INVALID.with(Rc::clone),
+                        defined_starting_from_point: None,
+                    });
+                });
+                f
+            }));
+        Ok(())
+    }
+
+    fn process_variable(
+        &self,
+        function: &FunctionOrFact,
+        unprocessed_functions: &SortedSmallVec<
+            (FunctionOrFact, SmallVec<[UnprocessedVariable; 4]>),
+            4,
+            impl SSVHandler<(FunctionOrFact, SmallVec<[UnprocessedVariable; 4]>), Key = str>,
+        >,
+        failed_functions: &[(FunctionOrFact, SmallVec<[UnprocessedVariable; 4]>)],
+        caller_var: &UnprocessedVariable,
+    ) -> Result<Rc<VariableDomain>, ()> {
+        caller_var
+            .domain_all_of
+            .iter()
+            .map(|usage| match usage {
+                VariableUsage::ArithIs => Ok(VariableDomain::NUMBER.with(Rc::clone)),
+                // VariableUsage::PatternMatchEq(res) => todo!(),
+                VariableUsage::NestedCall(nested) => nested
+                    .iter()
+                    .position(|first_nested| first_nested.function.is_some()) // If there is no function call (e.g. [X|Tail]), then it's "Any"
+                    .map(|first_nested| {
+                        let nested = unsafe { nested.get_unchecked(first_nested..) };
+                        let first_nested = &unsafe {
+                            nested
+                                .get_unchecked(0)
+                                .function
+                                .as_ref()
+                                .unwrap_unchecked()
+                        }
+                        .text;
+                        let domain_any_of_self = if function.head.name.text == *first_nested {
+                            function.head.get_param_at(nested).map(|param|
+                                VariableDomain::from_argument(param, |var| {
+                                    if var.text == caller_var.declaration {
+                                        Ok(VariableDomain::ANY.with(Rc::clone))
+                                    } else {
+                                        match unsafe { function.variables.get(&&**var) } {
+                                            Some(var) => Ok(var.domain.clone()),
+                                            None => Err(()), // This var is still unprocessed
+                                        }
+                                    }
+                                })
+                            )
+                        } else {
+                            None
+                        };
+                        let domain_any_of_extern = std::iter::chain(
+                            std::iter::chain(
+                                unsafe { self.functions_and_facts.get(first_nested) }.iter().map(|function| (function, const { &[] as &[_] })),
+                                None, // TODO Add imported functions
+                            ),
+                            std::iter::chain(
+                                unsafe { unprocessed_functions.get(first_nested) }.iter().map(|(a, b)| (a, &**b)),
+                                failed_functions.iter().filter(|(f, _)| f.head.name.text == *first_nested).map(|(a, b)| (a, &**b)),
+                            ),
+                        );
+                        // TODO If there are no functions that match the given name, that should be a hard error, which it kind of is since it will be converted to !, but it should be more explicit as to why
+                        let domain_any_of_extern = domain_any_of_extern
+                            .filter_map(|(callee, callees_unprocessed_params)|
+                                // TODO If there's test(X,Y):-... and test(X,Y,Z):-..., then example(test(X,Y)):-... would try to get info about both, even though it shouldn't.
+                                //   It isn't really a big problem since that is a warning anyway
+                                //   This applies to all callers of `get_param_at`, since we just filter_map on outputs known to be invalid, but not on those that seem possible bc we didn't check the arity
+                                callee.head.get_param_at(nested)
+                                    .map(|callee_param| (callee_param, callee, callees_unprocessed_params))
+                            );
+                        let domain_any_of_extern = domain_any_of_extern
+                            .map(|(callee_param, callee, callees_unprocessed_params)|
+                                VariableDomain::from_argument(callee_param, |callee_var| {
+                                    // At this point, we have a callee_var, so we have to convert it to a caller_var
+                                    let callee_ctx_res = match unsafe { callee.variables.get(&&**callee_var) } {
+                                        Some(var) => var.domain.clone(),
+                                        None => return Err(()), // This var is still unprocessed
+                                    };
+                                    let caller_ctx_res = std::iter::chain(
+                                            callee.head.get_path_for(callee_var)
+                                                .filter_map(|(_, path)| function.head.get_param_at(path)),
+                                            (&callee_ctx_res.references_variables)
+                                                .into_iter()
+                                                .flat_map(|other_param_of_callee|
+                                                    callee.head.get_path_for(other_param_of_callee)
+                                                        .filter_map(|(_, path)| function.head.get_param_at(path))
+                                                )
+                                        )
+                                        .map(|caller_param| VariableDomain::from_argument(caller_param, |new_caller_var| Ok(
+                                            // At this point, we already have a caller_var, so we don't need to convert it from a callee_var as before
+                                            if &**new_caller_var == &*caller_var.declaration {
+                                                // TODO does this make sense?
+                                                    VariableDomain::ANY.with(Rc::clone)
+                                            } else {
+                                                let new_caller_var_domain = match unsafe { function.variables.get(&&**new_caller_var) } {
+                                                    Some(var) => var.domain.clone(),
+                                                    None => return Err(()), // This var is still unprocessed
+                                                };
+                                                let res = VariableDomain {
+                                                    kind: new_caller_var_domain.kind.clone(),
+                                                    references_variables: unsafe { SortedSmallSet::union_iters(
+                                                        (&new_caller_var_domain.references_variables).into_iter().cloned(),
+                                                        Some(new_caller_var.text.clone())
+                                                    ) },
+                                                };
+                                                if res == *new_caller_var_domain {
+                                                    new_caller_var_domain
+                                                } else {
+                                                    Rc::new(res)
+                                                }
+                                            }
+                                        )))
+                                        .collect::<Result<VariableDomainCollector<{ ReductionKind::Intersection }>, ()>>()?.0;
+                                    Ok(VariableDomainCollector::<{ ReductionKind::Intersection }>::reduce(
+                                        caller_ctx_res,
+                                        VariableDomain {
+                                            kind: callee_ctx_res.kind.clone(),
+                                            references_variables: SortedSmallSet::empty(),
+                                        },
+                                    ))
+                                })
+                            );
+                        std::iter::chain(domain_any_of_self, domain_any_of_extern)
+                            .collect::<Result<VariableDomainCollector<{ ReductionKind::Union }>, ()>>()
+                            .map(|x| x.0)
+                    })
+                    .unwrap_or(Ok(VariableDomain::ANY.with(Rc::clone)))
+            })
+            .collect::<Result<VariableDomainCollector<{ ReductionKind::Intersection }>, ()>>()
+            .map(|VariableDomainCollector(x)| x)
     }
 }
 #[derive(Debug)]
@@ -581,10 +671,10 @@ pub struct FunctionOrFact {
     pub head: FunctionHeadOrFact,
     pub position_including_body: NoAlternate<Range>,
     pub variables: SortedSmallSet<Variable, 16, VarToName>,
-    pub body_variables: SortedSmallVec<MiniNode, 16, MiniNodeToName>,
+    pub body_variables: SortedSmallVec<NoAlternate<MiniNode>, 16, MiniNodeToName>,
 }
 sss_handler!(<()> pub VarToName<Variable> Key = str; |x| &x.declaration);
-ssv_handler!(<()> pub MiniNodeToName<MiniNode> Key = str; |x| &x);
+ssv_handler!(<()> pub MiniNodeToName<NoAlternate<MiniNode>> Key = str; |x| &x);
 #[derive(Debug)]
 pub enum Argument<Function: Deref<Target = FunctionHeadOrFact> = Box<FunctionHeadOrFact>> {
     Number(MiniNode),
@@ -819,16 +909,16 @@ impl VariableDomain {
         }
     }
 
-    fn from_argument(
+    fn from_argument<Err>(
         arg: &Argument,
-        mut parameter_resolver: impl FnMut(&MiniNode) -> Rc<Self>,
-    ) -> Rc<Self> {
-        fn inner(
+        mut parameter_resolver: impl FnMut(&MiniNode) -> Result<Rc<Self>, Err>,
+    ) -> Result<Rc<Self>, Err> {
+        fn inner<Err>(
             arg: &Argument,
-            parameter_resolver: &mut impl FnMut(&MiniNode) -> Rc<VariableDomain>,
-        ) -> Rc<VariableDomain> {
+            parameter_resolver: &mut impl FnMut(&MiniNode) -> Result<Rc<VariableDomain>, Err>,
+        ) -> Result<Rc<VariableDomain>, Err> {
             if let Argument::Variable(var) = arg {
-                VariableDomain::try_static(parameter_resolver(var))
+                parameter_resolver(var).map(VariableDomain::try_static)
             } else {
                 let res = VariableDomain {
                     kind: Some(ComplexKind {
@@ -844,13 +934,18 @@ impl VariableDomain {
                         .map(SortedSmallSet::single)
                         .unwrap_or(SortedSmallSet::empty()),
                         array_kind: match arg {
-                            Argument::List(args, _) => Some((
-                                args.into_iter()
-                                    .map(|x| inner(x, parameter_resolver))
-                                    .collect::<VariableDomainCollector<{ ReductionKind::Union }>>()
-                                    .0,
-                                args.is_empty(),
-                            )),
+                            Argument::List(args, _) => {
+                                Some((
+                                    args.into_iter()
+                                        .map(|x| inner(x, parameter_resolver))
+                                        .collect::<Result<
+                                            VariableDomainCollector<{ ReductionKind::Union }>,
+                                            _,
+                                        >>()?
+                                        .0,
+                                    args.is_empty(),
+                                ))
+                            }
                             _ => None,
                         },
                     }),
@@ -859,7 +954,7 @@ impl VariableDomain {
                         _ => SortedSmallSet::empty(),
                     },
                 };
-                VariableDomain::try_static(res)
+                Ok(VariableDomain::try_static(res))
             }
         }
         inner(arg, &mut parameter_resolver)

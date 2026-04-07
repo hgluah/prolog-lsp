@@ -1,5 +1,6 @@
 use std::fmt::Write;
 
+use anyhow::bail;
 use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionItemLabelDetails, CompletionResponse,
     Documentation, InsertTextFormat,
@@ -180,7 +181,7 @@ pub fn completions(pos: GridIndex, document: &Document) -> anyhow::Result<Comple
 
     let function_name = function.child_by_field_name("function").unwrap();
     if function_name.kind() != "atom" || function_name.child_count() != 0 {
-        todo!() // TODO
+        bail!("{function:#}") // TODO
     }
     let function_name = function_name.utf8_text(&document.text.text.as_bytes())?;
 
